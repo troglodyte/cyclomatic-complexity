@@ -183,16 +183,42 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// Column layout, copied from jscx so the two tools' output lines up:
-/// score right-aligned in 6, line right-aligned in 7, two spaces, kind
-/// left-aligned in 13, then two spaces of indent per nesting level.
+/// Which display options the table writer needs.
+#[derive(Clone, Copy)]
+struct Style {
+    header: bool,
+    explain: bool,
+    /// One flat table with a Location column, instead of a section per file.
+    flat: bool,
+}
+
+/// Column layout, copied from jscx so the two tools' output lines up: score
+/// right-aligned in 6, line right-aligned in 7, two spaces, kind left-aligned
+/// in 13, then two spaces of indent per nesting level.
+///
+/// `--sort` orders rows by score across files, which makes grouping by file
+/// meaningless — a file's header would reappear every time its rows resurface.
+/// Sorted output goes out flat instead, every row carrying its own
+/// `file:line`, which is what jscx does.
 fn write_table<W: Write>(
     w: &mut W,
     rows: &[Row],
     summary: &Summary,
-    header: bool,
-    explain: bool,
+    style: Style,
 ) -> io::Result<()> {
+    if style.flat {
+        write_flat(w, rows, style)?;
+    } else {
+        write_grouped(w, rows, style)?;
+    }
+    if !rows.is_empty() {
+        writeln!(w)?;
+    }
+    write_summary(w, summary)
+}
+
+/// A section per file, rows in source order and indented by nesting depth.
+fn write_grouped<W: Write>(w: &mut W, rows: &[Row], style: Style) -> io::Result<()> {
     let mut current = "";
     for row in rows {
         if row.file != current {
@@ -200,7 +226,7 @@ fn write_table<W: Write>(
                 writeln!(w)?;
             }
             writeln!(w, "{}", row.file.bold())?;
-            if header {
+            if style.header {
                 writeln!(w, "{:>6}{:>7}  {:<13}Name", "CC", "Line", "Kind")?;
             }
             current = &row.file;
@@ -215,17 +241,66 @@ fn write_table<W: Write>(
             " ".repeat(2 * f.depth as usize),
             f.name
         )?;
-        if explain {
-            for p in &f.points {
-                // Six spaces, then the line right-aligned in 7 so it sits under
-                // the Line column.
-                writeln!(w, "      {:>7}  {}", p.line, p.branch)?;
-            }
-        }
+        // 6 for the score, 7 for the line: points sit under the Line column.
+        write_points(w, f, style.explain, 13)?;
     }
-    if !rows.is_empty() {
-        writeln!(w)?;
+    Ok(())
+}
+
+/// One table, no file sections. The Location column is widened to the longest
+/// `file:line` so the Kind and Name columns still line up. Depth is not shown:
+/// a sorted row rarely sits next to the function it nests in.
+fn write_flat<W: Write>(w: &mut W, rows: &[Row], style: Style) -> io::Result<()> {
+    let locs: Vec<String> = rows
+        .iter()
+        .map(|r| format!("{}:{}", r.file, r.func.line))
+        .collect();
+    let width = locs
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max("Location".len());
+
+    // No rows, no header: an empty flat table is just the summary, the way an
+    // empty grouped one is.
+    if style.header && !rows.is_empty() {
+        writeln!(w, "{:>6}  {:<width$}  {:<13}Name", "CC", "Location", "Kind", width = width)?;
     }
+    for (row, loc) in rows.iter().zip(&locs) {
+        let f = &row.func;
+        // Pad by hand: `loc` is colored, and a width spec would count the
+        // escape bytes and shift the columns right.
+        let pad = " ".repeat(width - loc.len());
+        writeln!(
+            w,
+            "{:>6}  {}{}  {:<13}{}",
+            f.complexity,
+            loc.bold(),
+            pad,
+            f.kind.label(),
+            f.name
+        )?;
+        // Right-aligned on the Location column's far edge, so a point's line
+        // lands under the location it belongs to and its branch under Kind.
+        write_points(w, f, style.explain, 8 + width)?;
+    }
+    Ok(())
+}
+
+/// The decision points behind one score, each right-aligned in `width` so it
+/// falls under whichever column carries the function's own line number.
+fn write_points<W: Write>(w: &mut W, f: &Func, explain: bool, width: usize) -> io::Result<()> {
+    if !explain {
+        return Ok(());
+    }
+    for p in &f.points {
+        writeln!(w, "{:>width$}  {}", p.line, p.branch, width = width)?;
+    }
+    Ok(())
+}
+
+fn write_summary<W: Write>(w: &mut W, summary: &Summary) -> io::Result<()> {
     write!(
         w,
         "{} function{} in {} file{}",
@@ -423,7 +498,8 @@ fn render(rows: &[Row], summary: &Summary, cfg: &Config) -> io::Result<()> {
     if cfg.json {
         write_json(&mut w, rows, summary)
     } else {
-        write_table(&mut w, rows, summary, cfg.header, cfg.explain)
+        let style = Style { header: cfg.header, explain: cfg.explain, flat: cfg.sort };
+        write_table(&mut w, rows, summary, style)
     }
 }
 
@@ -574,7 +650,7 @@ mod tests {
         colored::control::set_override(false);
         let s = summarize(rows);
         let mut out = Vec::new();
-        write_table(&mut out, rows, &s, header, explain).unwrap();
+        write_table(&mut out, rows, &s, Style { header, explain, flat: false }).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -625,6 +701,69 @@ src/b.rs
     fn empty_input_reports_nothing_found() {
         let out = render(&[], true, false);
         assert_eq!(out, "0 functions in 0 files\n");
+    }
+
+    fn render_flat(rows: &[Row], header: bool, explain: bool) -> String {
+        colored::control::set_override(false);
+        let s = summarize(rows);
+        let mut out = Vec::new();
+        write_table(&mut out, rows, &s, Style { header, explain, flat: true }).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Rows sorted by score interleave the files they came from. Grouping by
+    /// file would reprint a header every time a file resurfaced, so sorted
+    /// output is one flat table keyed by location.
+    fn interleaved() -> Vec<Row> {
+        vec![
+            Row { file: "src/a.rs".into(), func: func("validate", FnKind::Fn, 12, 14, 0) },
+            Row { file: "src/b.rs".into(), func: func("S::go", FnKind::Method, 4, 9, 0) },
+            Row { file: "src/a.rs".into(), func: func("map", FnKind::Closure, 61, 3, 1) },
+        ]
+    }
+
+    #[test]
+    fn sorted_output_is_one_flat_table() {
+        let out = render_flat(&interleaved(), true, false);
+        assert_eq!(out.matches("Location").count(), 1, "got:\n{out}");
+        // The bare filename headers of the grouped layout must not appear.
+        assert!(!out.contains("\nsrc/a.rs\n"), "got:\n{out}");
+        assert!(!out.contains("\nsrc/b.rs\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn flat_columns_align_on_the_longest_location() {
+        let out = render_flat(&interleaved(), true, false);
+        let kind_col = |line: &str| line.find("fn ").or(line.find("method")).or(line.find("closure"));
+        let cols: Vec<Option<usize>> = out.lines().skip(1).take(3).map(kind_col).collect();
+        assert!(cols.windows(2).all(|w| w[0] == w[1]), "kind column ragged: {cols:?}\n{out}");
+    }
+
+    #[test]
+    fn flat_layout_drops_the_depth_indent() {
+        // `map` is depth 1; sorted rows rarely sit next to what they nest in.
+        let out = render_flat(&interleaved(), true, false);
+        assert!(out.contains("closure      map\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn no_header_drops_the_flat_column_row() {
+        let out = render_flat(&interleaved(), false, false);
+        assert!(!out.contains("Location"), "got:\n{out}");
+    }
+
+    #[test]
+    fn empty_flat_table_is_just_the_summary() {
+        assert_eq!(render_flat(&[], true, false), "0 functions in 0 files\n");
+    }
+
+    #[test]
+    fn flat_explain_lines_sit_against_the_location_column() {
+        let mut rows = interleaved();
+        rows[0].func.points = vec![Point { line: 13, branch: "if" }];
+        let out = render_flat(&rows, true, true);
+        // Location column is 11 wide ("src/a.rs:12"), so points right-align at 19.
+        assert!(out.contains("\n                 13  if\n"), "got:\n{out}");
     }
 
     fn selected(cfg: Config, rows: Vec<Row>) -> Vec<(String, u32)> {

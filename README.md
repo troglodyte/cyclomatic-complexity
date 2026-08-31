@@ -43,7 +43,7 @@ rustcx [OPTIONS] -             read from stdin
 | `-m, --min <N>` | only report functions scoring N or higher (default 1) |
 | `-M, --max <N>` | exit 1 if any function scores above N — for CI |
 | `-t, --top <N>` | show only the N worst functions |
-| `-s, --sort` | sort by score, highest first |
+| `-s, --sort` | sort by score, highest first (one flat table) |
 | `--no-header` | do not print the table header |
 | `-j, --json` | machine-readable output |
 | `-e, --explain` | list the decision points behind each score |
@@ -56,6 +56,25 @@ rustcx [OPTIONS] -             read from stdin
 Directories are walked recursively for `.rs` files, skipping `target`, `.git`,
 `.hg`, `.svn`, and `.jj`. A file named explicitly on the command line is read
 whatever its extension.
+
+`--sort` orders rows by score across the whole run, which leaves them
+interleaved between files — so grouping by file would reprint a file's header
+every time its rows resurfaced. Sorted output is one flat table instead, each
+row carrying its own location, which is what jscx does:
+
+```console
+$ rustcx --sort --min 4 fixtures/
+    CC  Location                 Kind         Name
+     8  fixtures/patterns.rs:16  fn           describe
+     5  fixtures/simple.rs:9     fn           branchy
+     4  fixtures/patterns.rs:27  fn           unwrap_pair
+
+3 functions in 2 files · mean 5.7 · worst 8 (describe at fixtures/patterns.rs:16)
+```
+
+Note that `--top` on its own does not imply `--sort` here, as it does in jscx:
+it picks the N worst and then restores source order, so the table still reads
+file by file. Add `--sort` to see them ranked.
 
 ## As a CI gate
 

@@ -190,3 +190,31 @@ fn the_ci_gate_reads_naturally() {
     let (_, _, breach) = rustcx(&["--max", "2", "fixtures"]);
     assert_eq!(breach, 1);
 }
+
+#[test]
+fn sort_prints_one_flat_table_across_files() {
+    // Scores interleave the two fixture files, which used to reprint a file
+    // header every time that file's rows resurfaced.
+    let (stdout, _, code) = rustcx(&["--sort", "--min", "4", "fixtures/"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.matches("Location").count(), 1, "got:\n{stdout}");
+    // A grouped header is a line that is nothing but the filename. The summary
+    // names the file too, so count bare header lines rather than mentions.
+    assert!(
+        !stdout.lines().any(|l| l == "fixtures/patterns.rs"),
+        "no file should get a section header, got:\n{stdout}"
+    );
+    assert!(row_for(&stdout, "describe").starts_with("     8  fixtures/patterns.rs:16"),
+            "got:\n{stdout}");
+}
+
+#[test]
+fn without_sort_the_table_is_still_grouped_by_file() {
+    let (stdout, _, code) = rustcx(&["--min", "4", "fixtures/"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("Location"), "got:\n{stdout}");
+    assert!(
+        stdout.lines().any(|l| l == "fixtures/patterns.rs"),
+        "got:\n{stdout}"
+    );
+}
