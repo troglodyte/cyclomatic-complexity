@@ -3,7 +3,7 @@
 Cyclomatic complexity for Rust functions. One binary walks a source tree, parses
 every file with `syn`, and prints one row per function: score, line, kind, name.
 It gates CI through `--max` and points at what to refactor through `--top` and
-`--explain`. It is a sibling to [`jscx`](https://github.com/trog/jscx), which
+`--explain`. It is a sibling to [`jscx`](https://github.com/troglodyte/jscx), which
 does the same job for JavaScript and TypeScript, and whose CLI, output format,
 and exit codes it copies so the two are interchangeable in a build script.
 
@@ -16,13 +16,13 @@ src/analyze.rs
 
 src/main.rs
     CC   Line  Kind         Name
-    27     65  fn           parse_args
-     9    148  fn           write_table
-     5    214  fn           collect
-     5    241  fn           select
-    14    312  fn           run
+     7    119  fn           parse_args
+     9    189  fn           write_table
+     5    255  fn           collect
+     5    282  fn           select
+     5    353  fn           run
 
-7 functions in 2 files · mean 10.0 · worst 27 (parse_args at src/main.rs:65)
+7 functions in 2 files · mean 5.9 · worst 9 (write_table at src/main.rs:189)
 ```
 
 ## Install
@@ -60,7 +60,7 @@ whatever its extension.
 ## As a CI gate
 
 ```bash
-rustcx --max 15 src/
+rustcx --max 10 src/
 ```
 
 | Exit code | Meaning |
@@ -180,6 +180,12 @@ file, so memory stays flat across a large tree.
 cargo test                        # unit, CLI, and fixture tests
 cargo run -- fixtures/ --explain  # see the analyzer's reasoning
 cargo clippy -- -D warnings
+```
+
+rustcx gates itself at 10:
+
+```bash
+cargo run -- --max 10 --no-tests src/
 ```
 
 `fixtures/` holds hand-checked sample files whose expected scores are asserted in

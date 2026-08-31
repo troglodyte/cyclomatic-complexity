@@ -59,6 +59,60 @@ impl Default for Config {
     }
 }
 
+/// What an option does when it appears on the command line.
+enum Action {
+    /// A flag with no value.
+    Set(fn(&mut Config)),
+    /// A flag that consumes the next argument as a number.
+    Num(fn(&mut Config, u32)),
+    /// Prints something and ends the run successfully.
+    Terminal(fn()),
+}
+
+/// Every option, in help order: short form, long form, what it does. Either
+/// form may be `""` for an option that has only the other one.
+///
+/// This is a table rather than a `match` so that adding an option is adding a
+/// row. It also keeps `parse_args` flat: the arms here are data, so the parser
+/// dispatches on three kinds of option instead of on thirteen names.
+const FLAGS: &[(&str, &str, Action)] = &[
+    ("-h", "--help", Action::Terminal(|| print!("{HELP}"))),
+    ("-V", "--version", Action::Terminal(|| println!("rustcx {}", env!("CARGO_PKG_VERSION")))),
+    ("-m", "--min", Action::Num(|c, n| c.min = n)),
+    ("-M", "--max", Action::Num(|c, n| c.max = Some(n))),
+    ("-t", "--top", Action::Num(|c, n| c.top = Some(n as usize))),
+    ("-s", "--sort", Action::Set(|c| c.sort = true)),
+    ("", "--no-header", Action::Set(|c| c.header = false)),
+    ("-j", "--json", Action::Set(|c| c.json = true)),
+    ("-e", "--explain", Action::Set(|c| c.explain = true)),
+    ("", "--question", Action::Set(|c| c.opts.question = true)),
+    ("", "--no-logical", Action::Set(|c| c.opts.logical = false)),
+    ("", "--no-tests", Action::Set(|c| c.opts.tests = false)),
+    ("-", "", Action::Set(|c| c.stdin = true)),
+];
+
+/// Find the option `arg` names, by either form. An empty form never matches.
+fn lookup(arg: &str) -> Option<&'static Action> {
+    FLAGS
+        .iter()
+        .find(|(short, long, _)| matches_form(short, arg) || matches_form(long, arg))
+        .map(|(_, _, action)| action)
+}
+
+fn matches_form(form: &str, arg: &str) -> bool {
+    !form.is_empty() && form == arg
+}
+
+/// A bare argument is a path. Anything else starting with `-` is a typo, not a
+/// filename — reporting it beats silently scanning for a file named `--min`.
+fn push_path(cfg: &mut Config, arg: &str) -> Result<(), String> {
+    if arg.starts_with('-') && arg.len() > 1 {
+        return Err(format!("unknown option: {arg}"));
+    }
+    cfg.paths.push(PathBuf::from(arg));
+    Ok(())
+}
+
 /// Parse argv (without the program name).
 ///
 /// `Ok(None)` means help or version was printed and the caller should exit 0.
@@ -67,32 +121,18 @@ fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        match arg {
-            "-h" | "--help" => {
-                print!("{HELP}");
+        match lookup(arg) {
+            Some(Action::Terminal(print)) => {
+                print();
                 return Ok(None);
             }
-            "-V" | "--version" => {
-                println!("rustcx {}", env!("CARGO_PKG_VERSION"));
-                return Ok(None);
+            Some(Action::Set(apply)) => apply(&mut cfg),
+            Some(Action::Num(apply)) => {
+                // take_number advances `i` past the value.
+                let n = take_number(args, &mut i, arg)?;
+                apply(&mut cfg, n);
             }
-            "-m" | "--min" => cfg.min = take_number(args, &mut i, arg)?,
-            "-M" | "--max" => cfg.max = Some(take_number(args, &mut i, arg)?),
-            "-t" | "--top" => cfg.top = Some(take_number(args, &mut i, arg)? as usize),
-            "-s" | "--sort" => cfg.sort = true,
-            "--no-header" => cfg.header = false,
-            "-j" | "--json" => cfg.json = true,
-            "-e" | "--explain" => cfg.explain = true,
-            "--question" => cfg.opts.question = true,
-            "--no-logical" => cfg.opts.logical = false,
-            "--no-tests" => cfg.opts.tests = false,
-            "-" => cfg.stdin = true,
-            _ => {
-                if arg.starts_with('-') && arg.len() > 1 {
-                    return Err(format!("unknown option: {arg}"));
-                }
-                cfg.paths.push(PathBuf::from(arg));
-            }
+            None => push_path(&mut cfg, arg)?,
         }
         i += 1;
     }
@@ -101,6 +141,7 @@ fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     }
     Ok(Some(cfg))
 }
+
 
 /// Consume the value following a flag and parse it as a number, advancing `i`.
 fn take_number(args: &[String], i: &mut usize, flag: &str) -> Result<u32, String> {
@@ -311,67 +352,94 @@ fn write_json<W: Write>(w: &mut W, rows: &[Row], summary: &Summary) -> io::Resul
 
 fn run(cfg: &Config) -> ExitCode {
     let mut rows: Vec<Row> = Vec::new();
-    let mut trouble = false;
+    let mut ok = true;
 
     if cfg.stdin {
-        let mut src = String::new();
-        if let Err(e) = io::Read::read_to_string(&mut io::stdin(), &mut src) {
-            eprintln!("rustcx: <stdin>: {e}");
-            return ExitCode::from(2);
+        match read_stdin() {
+            // `&=`, not `&&`: score_into must run for its side effect.
+            Ok(src) => ok &= score_into(&mut rows, "<stdin>", &src, cfg),
+            Err(e) => {
+                eprintln!("rustcx: <stdin>: {e}");
+                return ExitCode::from(2);
+            }
         }
-        trouble |= !score_into(&mut rows, "<stdin>", &src, cfg);
     }
+    ok &= score_files(&mut rows, cfg);
 
-    // Expand the paths given on the command line. A file named explicitly is
-    // read whatever its extension; a directory is walked for `.rs`.
-    let mut files: Vec<PathBuf> = Vec::new();
-    for p in &cfg.paths {
+    let rows = select(rows, cfg);
+    let summary = summarize(&rows);
+    if render(&rows, &summary, cfg).is_err() {
+        return ExitCode::from(2);
+    }
+    exit_code(&rows, cfg, ok)
+}
+
+fn read_stdin() -> io::Result<String> {
+    let mut src = String::new();
+    io::Read::read_to_string(&mut io::stdin(), &mut src)?;
+    Ok(src)
+}
+
+/// Expand the paths given on the command line into files to score. A file named
+/// explicitly is taken whatever its extension; a directory is walked for `.rs`.
+///
+/// Returns false if a directory could not be read.
+fn expand_paths(paths: &[PathBuf], files: &mut Vec<PathBuf>) -> bool {
+    let mut ok = true;
+    for p in paths {
         if p.is_dir() {
-            if let Err(e) = collect(p, &mut files) {
+            if let Err(e) = collect(p, files) {
                 eprintln!("rustcx: {}: {e}", p.display());
-                trouble = true;
+                ok = false;
             }
         } else {
             files.push(p.clone());
         }
     }
+    ok
+}
 
+/// Score every file named or discovered under the command-line paths, appending
+/// their rows. Returns false if any path could not be read or parsed.
+fn score_files(rows: &mut Vec<Row>, cfg: &Config) -> bool {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut ok = expand_paths(&cfg.paths, &mut files);
     for path in &files {
         match fs::read_to_string(path) {
-            Ok(src) => {
-                let name = path.display().to_string();
-                trouble |= !score_into(&mut rows, &name, &src, cfg);
-            }
+            Ok(src) => ok &= score_into(rows, &path.display().to_string(), &src, cfg),
             Err(e) => {
                 eprintln!("rustcx: {}: {e}", path.display());
-                trouble = true;
+                ok = false;
             }
         }
     }
+    ok
+}
 
-    let rows = select(rows, cfg);
-    let summary = summarize(&rows);
+/// Write the report to stdout in whichever format `cfg` selects.
+fn render(rows: &[Row], summary: &Summary, cfg: &Config) -> io::Result<()> {
     let stdout = io::stdout();
     let mut w = stdout.lock();
-    let wrote = if cfg.json {
-        write_json(&mut w, &rows, &summary)
+    if cfg.json {
+        write_json(&mut w, rows, summary)
     } else {
-        write_table(&mut w, &rows, &summary, cfg.header, cfg.explain)
-    };
-    if wrote.is_err() {
-        return ExitCode::from(2);
+        write_table(&mut w, rows, summary, cfg.header, cfg.explain)
     }
-
-    if trouble {
-        return ExitCode::from(2);
-    }
-    if let Some(max) = cfg.max {
-        if rows.iter().any(|r| r.func.complexity > max) {
-            return ExitCode::from(1);
-        }
-    }
-    ExitCode::SUCCESS
 }
+
+/// 2 if any path failed, 1 if `--max` was exceeded, 0 otherwise.
+fn exit_code(rows: &[Row], cfg: &Config, ok: bool) -> ExitCode {
+    if !ok {
+        return ExitCode::from(2);
+    }
+    let over = cfg.max.is_some_and(|max| rows.iter().any(|r| r.func.complexity > max));
+    if over {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 
 /// Analyze one source and append its rows. Returns false on a parse error.
 ///
