@@ -24,6 +24,7 @@ OPTIONS:
         --question     count `?` as a branch (off by default)
         --no-logical   don't count `&&`, `||`
         --no-tests     skip #[test] functions and #[cfg(test)] modules
+        --lsp          run as a Language Server (stdio)
     -h, --help         print this help
     -V, --version      print version
 ";
@@ -39,6 +40,7 @@ struct Config {
     header: bool,
     json: bool,
     explain: bool,
+    lsp: bool,
     opts: Options,
 }
 
@@ -54,6 +56,7 @@ impl Default for Config {
             header: true,
             json: false,
             explain: false,
+            lsp: false,
             opts: Options::default(),
         }
     }
@@ -88,6 +91,7 @@ const FLAGS: &[(&str, &str, Action)] = &[
     ("", "--question", Action::Set(|c| c.opts.question = true)),
     ("", "--no-logical", Action::Set(|c| c.opts.logical = false)),
     ("", "--no-tests", Action::Set(|c| c.opts.tests = false)),
+    ("", "--lsp", Action::Set(|c| c.lsp = true)),
     ("-", "", Action::Set(|c| c.stdin = true)),
 ];
 
@@ -136,7 +140,7 @@ fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
         }
         i += 1;
     }
-    if cfg.paths.is_empty() && !cfg.stdin {
+    if cfg.paths.is_empty() && !cfg.stdin && !cfg.lsp {
         return Err("no paths given".to_string());
     }
     Ok(Some(cfg))
@@ -550,6 +554,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if cfg.lsp {
+        if let Err(e) = rustcx::lsp::run() {
+            eprintln!("rustcx: LSP error: {e}");
+            return ExitCode::from(2);
+        }
+        return ExitCode::SUCCESS;
+    }
     run(&cfg)
 }
 
@@ -588,6 +599,13 @@ mod tests {
         assert!(!parse(&["--no-logical", "x.rs"]).opts.logical);
         assert!(parse(&["--question", "x.rs"]).opts.question);
         assert!(!parse(&["--no-tests", "x.rs"]).opts.tests);
+    }
+
+    #[test]
+    fn the_lsp_flag_needs_no_paths() {
+        let c = parse(&["--lsp"]);
+        assert!(c.lsp);
+        assert!(c.paths.is_empty(), "a server reads no paths");
     }
 
     #[test]
