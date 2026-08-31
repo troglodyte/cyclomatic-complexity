@@ -12,6 +12,27 @@ fn rustcx(args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// A unique empty directory under the system temp dir, so tests that write a
+/// `rustcx.toml` cannot see each other's.
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rustcx-{}-{}-{}", tag, std::process::id(), n));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Run the binary with `dir` as the working directory, which is where config
+/// discovery starts.
+fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_rustcx"))
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run rustcx")
+}
+
 /// The row for `name`, or panic. Used to assert on the score column rather
 /// than searching the whole output for a number that could match elsewhere.
 fn row_for<'a>(stdout: &'a str, name: &str) -> &'a str {
@@ -217,4 +238,37 @@ fn without_sort_the_table_is_still_grouped_by_file() {
         stdout.lines().any(|l| l == "fixtures/patterns.rs"),
         "got:\n{stdout}"
     );
+}
+
+#[test]
+fn a_config_file_supplies_the_max_gate() {
+    let dir = temp_dir("cli-config");
+    std::fs::write(dir.join("rustcx.toml"), "max = 2\n").unwrap();
+    std::fs::write(dir.join("busy.rs"), "fn f(a: bool) { if a {} if a {} if a {} }\n").unwrap();
+
+    // Complexity 4 is over `max = 2`, so the gate fails with no --max flag.
+    let out = run_in(&dir, &["busy.rs"]);
+    assert_eq!(out.status.code(), Some(1), "rustcx.toml gates the run");
+}
+
+#[test]
+fn a_flag_overrides_the_config_file() {
+    let dir = temp_dir("cli-override");
+    std::fs::write(dir.join("rustcx.toml"), "max = 2\n").unwrap();
+    std::fs::write(dir.join("busy.rs"), "fn f(a: bool) { if a {} if a {} if a {} }\n").unwrap();
+
+    let out = run_in(&dir, &["--max", "10", "busy.rs"]);
+    assert_eq!(out.status.code(), Some(0), "the flag wins over the file");
+}
+
+#[test]
+fn a_broken_config_file_is_reported() {
+    let dir = temp_dir("cli-broken");
+    std::fs::write(dir.join("rustcx.toml"), "treshold = 8\n").unwrap();
+    std::fs::write(dir.join("x.rs"), "fn f() {}\n").unwrap();
+
+    let out = run_in(&dir, &["x.rs"]);
+    assert_eq!(out.status.code(), Some(2), "a typo'd key is loud, not silent");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("rustcx.toml"), "got: {err}");
 }

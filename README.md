@@ -14,15 +14,24 @@ src/analyze.rs
      5     39  method       FnKind::label
      5    243  method       Walker::visit_local
 
+src/lsp.rs
+    CC   Line  Kind         Name
+     5    116  method       Server::update
+     7    233  fn           read_message
+     5    261  method       Server::request
+     6    287  method       Server::notification
+     5    327  fn           run
+
 src/main.rs
     CC   Line  Kind         Name
-     7    119  fn           parse_args
-     9    189  fn           write_table
-     5    255  fn           collect
-     5    282  fn           select
-     5    353  fn           run
+     8    127  fn           parse_args
+     5    229  fn           write_grouped
+     5    338  fn           collect
+     5    365  fn           select
+     5    436  fn           run
+     7    572  fn           main
 
-7 functions in 2 files · mean 5.9 · worst 9 (write_table at src/main.rs:189)
+13 functions in 3 files · mean 5.6 · worst 8 (parse_args at src/main.rs:127)
 ```
 
 ## Install
@@ -50,6 +59,7 @@ rustcx [OPTIONS] -             read from stdin
 | `--question` | count `?` as a branch (off by default) |
 | `--no-logical` | don't count `&&`, `\|\|` |
 | `--no-tests` | skip `#[test]` functions and `#[cfg(test)]` modules |
+| `--lsp` | run as a Language Server over stdio |
 | `-h, --help` | print help |
 | `-V, --version` | print version |
 
@@ -119,6 +129,83 @@ fixtures/patterns.rs
 
 Every listed line is one point, so the score is always `1 + the number of
 explain lines`. A score and its explanation can never disagree.
+
+## In your editor
+
+`rustcx --lsp` speaks LSP over stdio. It publishes a warning for every function
+at or above a threshold — an error at twice it — and answers hover over a
+function with the decision points behind its score.
+
+Hover works on a function's signature line and on any line it was charged a
+point for. Those are the branchy lines, which are the ones worth hovering; a
+blank line inside a function answers nothing.
+
+### Neovim
+
+Neovim 0.11 or newer, for `vim.lsp.config`:
+
+```lua
+vim.lsp.config('rustcx', {
+  cmd = { 'rustcx', '--lsp' },
+  filetypes = { 'rust' },
+  root_markers = { 'Cargo.toml', '.git' },
+})
+vim.lsp.enable('rustcx')
+```
+
+### Helix
+
+In `languages.toml`:
+
+```toml
+[language-server.rustcx]
+command = "rustcx"
+args = ["--lsp"]
+
+[[language]]
+name = "rust"
+language-servers = ["rust-analyzer", "rustcx"]
+```
+
+### VS Code and Zed
+
+Neither can attach an arbitrary stdio language server from settings alone —
+both need a small extension to register the binary. None is shipped here.
+
+### While you type
+
+A buffer is unparseable for most of the time you are typing into it. rustcx
+keeps the last diagnostics it published and keeps answering hover from the last
+successful parse, rather than clearing warnings on every keystroke or reporting
+a syntax error rust-analyzer has already reported. The parse failure is written
+to the language-server log (`:LspLog` in Neovim), once per distinct error.
+
+## Configuration
+
+`rustcx.toml`, found by walking up from the working directory — or from the
+workspace root, under `--lsp`:
+
+```toml
+max       = 15     # CI: fail above this score
+threshold = 11     # editor: warn from this score, error from twice it
+question  = false  # count `?` as a branch
+logical   = true   # count `&&` and `||`
+tests     = true   # score #[test] functions and #[cfg(test)] modules
+```
+
+Command-line flags win over the file; the file wins over the defaults above.
+Under `--lsp`, an editor's `initializationOptions` take the flags' place. An
+unknown key is an error rather than a shrug — a typo'd `treshold` that silently
+did nothing would be worse.
+
+The server re-reads the file whenever its modification time changes, so a new
+threshold takes effect on the next keystroke without restarting anything.
+
+**`max` and `threshold` are independent.** `max` gates CI; `threshold` is the
+editor's warning level, defaulting to 11. Setting only `max = 15` leaves your
+editor warning from 11 while CI fails only above 15. That is deliberate — it
+lets the editor nag before the build breaks — but if you want them identical,
+set both.
 
 ## Scoring
 
@@ -192,6 +279,15 @@ file, so memory stays flat across a large tree.
 - **Cyclomatic complexity is a blunt instrument.** It counts branches, not how
   tangled they are. A flat 20-arm `match` scores 21 and is usually fine; a nested
   8 is often worse. Read it as a place to look, not a verdict.
+- **In the editor, hover and diagnostics reflect the last successful parse**, so
+  both lag a buffer that is mid-edit, and hover answers only on a function's
+  signature line and its decision-point lines.
+- **The server analyzes one document at a time on its message loop.** A single
+  very large file blocks the loop for the length of its parse.
+- **A panic takes the server down.** The release profile sets `panic = "abort"`,
+  so a panic inside `syn` ends the process rather than being caught. Editors
+  restart a dead language server; the alternative would hide real analyzer bugs
+  behind a silently degraded session.
 
 ## Development
 

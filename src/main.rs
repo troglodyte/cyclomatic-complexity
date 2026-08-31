@@ -1,5 +1,6 @@
 use colored::Colorize;
 use rustcx::analyze::{Func, Options};
+use rustcx::config::FileConfig;
 use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
@@ -24,6 +25,7 @@ OPTIONS:
         --question     count `?` as a branch (off by default)
         --no-logical   don't count `&&`, `||`
         --no-tests     skip #[test] functions and #[cfg(test)] modules
+        --lsp          run as a Language Server (stdio)
     -h, --help         print this help
     -V, --version      print version
 ";
@@ -39,6 +41,9 @@ struct Config {
     header: bool,
     json: bool,
     explain: bool,
+    lsp: bool,
+    /// What the flags asked for, before the config file is layered under them.
+    cli: FileConfig,
     opts: Options,
 }
 
@@ -54,6 +59,8 @@ impl Default for Config {
             header: true,
             json: false,
             explain: false,
+            lsp: false,
+            cli: FileConfig::default(),
             opts: Options::default(),
         }
     }
@@ -79,15 +86,16 @@ const FLAGS: &[(&str, &str, Action)] = &[
     ("-h", "--help", Action::Terminal(|| print!("{HELP}"))),
     ("-V", "--version", Action::Terminal(|| println!("rustcx {}", env!("CARGO_PKG_VERSION")))),
     ("-m", "--min", Action::Num(|c, n| c.min = n)),
-    ("-M", "--max", Action::Num(|c, n| c.max = Some(n))),
+    ("-M", "--max", Action::Num(|c, n| c.cli.max = Some(n))),
     ("-t", "--top", Action::Num(|c, n| c.top = Some(n as usize))),
     ("-s", "--sort", Action::Set(|c| c.sort = true)),
     ("", "--no-header", Action::Set(|c| c.header = false)),
     ("-j", "--json", Action::Set(|c| c.json = true)),
     ("-e", "--explain", Action::Set(|c| c.explain = true)),
-    ("", "--question", Action::Set(|c| c.opts.question = true)),
-    ("", "--no-logical", Action::Set(|c| c.opts.logical = false)),
-    ("", "--no-tests", Action::Set(|c| c.opts.tests = false)),
+    ("", "--question", Action::Set(|c| c.cli.question = Some(true))),
+    ("", "--no-logical", Action::Set(|c| c.cli.logical = Some(false))),
+    ("", "--no-tests", Action::Set(|c| c.cli.tests = Some(false))),
+    ("", "--lsp", Action::Set(|c| c.lsp = true)),
     ("-", "", Action::Set(|c| c.stdin = true)),
 ];
 
@@ -136,7 +144,7 @@ fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
         }
         i += 1;
     }
-    if cfg.paths.is_empty() && !cfg.stdin {
+    if cfg.paths.is_empty() && !cfg.stdin && !cfg.lsp {
         return Err("no paths given".to_string());
     }
     Ok(Some(cfg))
@@ -540,9 +548,30 @@ fn score_into(rows: &mut Vec<Row>, name: &str, src: &str, cfg: &Config) -> bool 
     }
 }
 
+/// Layer a config file under the flags. Pure, so it is testable without a
+/// filesystem; `resolve` supplies the file.
+fn apply(cfg: &mut Config, file: FileConfig) {
+    let merged = cfg.cli.or(file);
+    cfg.opts = merged.options();
+    cfg.max = merged.max;
+}
+
+/// Find a `rustcx.toml` by walking up from `start`, and layer it under the
+/// flags. An unreadable or unparseable file is an error, not a shrug: a typo'd
+/// key that silently does nothing is the failure this guards against.
+fn resolve(cfg: &mut Config, start: &Path) -> Result<(), String> {
+    let file = match FileConfig::discover(start) {
+        Ok(Some((_, file))) => file,
+        Ok(None) => FileConfig::default(),
+        Err(e) => return Err(e.to_string()),
+    };
+    apply(cfg, file);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = match parse_args(&args) {
+    let mut cfg = match parse_args(&args) {
         Ok(Some(cfg)) => cfg,
         Ok(None) => return ExitCode::SUCCESS,
         Err(msg) => {
@@ -550,6 +579,21 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if cfg.lsp {
+        if let Err(e) = rustcx::lsp::run() {
+            eprintln!("rustcx: LSP error: {e}");
+            return ExitCode::from(2);
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Err(msg) = resolve(&mut cfg, &cwd) {
+        eprintln!("rustcx: {msg}");
+        return ExitCode::from(2);
+    }
+
     run(&cfg)
 }
 
@@ -584,17 +628,45 @@ mod tests {
     }
 
     #[test]
-    fn scoring_flags_flip_their_options() {
-        assert!(!parse(&["--no-logical", "x.rs"]).opts.logical);
-        assert!(parse(&["--question", "x.rs"]).opts.question);
-        assert!(!parse(&["--no-tests", "x.rs"]).opts.tests);
+    fn scoring_flags_record_their_intent() {
+        assert_eq!(parse(&["--no-logical", "x.rs"]).cli.logical, Some(false));
+        assert_eq!(parse(&["--question", "x.rs"]).cli.question, Some(true));
+        assert_eq!(parse(&["--no-tests", "x.rs"]).cli.tests, Some(false));
+        assert_eq!(
+            parse(&["x.rs"]).cli.tests,
+            None,
+            "an absent flag is unset, not false — that is what lets a file win"
+        );
+    }
+
+    #[test]
+    fn a_flag_beats_the_file_and_the_file_beats_the_default() {
+        // Flag set, file set: the flag wins.
+        let mut cfg = parse(&["--no-tests", "x.rs"]);
+        let file = FileConfig { tests: Some(true), max: Some(9), ..FileConfig::default() };
+        apply(&mut cfg, file);
+        assert!(!cfg.opts.tests, "the flag wins");
+        assert_eq!(cfg.max, Some(9), "and an unset flag takes the file's value");
+
+        // Neither set: the built-in default.
+        let mut cfg = parse(&["x.rs"]);
+        apply(&mut cfg, FileConfig::default());
+        assert!(cfg.opts.tests, "the built-in default is to score tests");
+        assert_eq!(cfg.max, None);
+    }
+
+    #[test]
+    fn the_lsp_flag_needs_no_paths() {
+        let c = parse(&["--lsp"]);
+        assert!(c.lsp);
+        assert!(c.paths.is_empty(), "a server reads no paths");
     }
 
     #[test]
     fn numeric_flags_accept_short_and_long_forms() {
         assert_eq!(parse(&["-m", "3", "x.rs"]).min, 3);
         assert_eq!(parse(&["--min", "3", "x.rs"]).min, 3);
-        assert_eq!(parse(&["-M", "15", "x.rs"]).max, Some(15));
+        assert_eq!(parse(&["-M", "15", "x.rs"]).cli.max, Some(15));
         assert_eq!(parse(&["-t", "20", "x.rs"]).top, Some(20));
     }
 
