@@ -9,6 +9,10 @@ license = "MIT"
 name = "rustcx"
 path = "src/lib.rs"
 
+[[bin]]
+name = "rustcx"
+path = "src/main.rs"
+
 [dependencies]
 syn = { version = "3", default-features = false, features = ["full", "parsing", "visit", "clone-impls"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
