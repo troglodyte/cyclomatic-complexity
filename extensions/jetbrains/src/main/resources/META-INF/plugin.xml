@@ -1,0 +1,37 @@
+<idea-plugin>
+    <id>dev.rustcx.intellij</id>
+    <name>rustcx</name>
+    <vendor url="https://github.com/troglodyte/rustcx">Michael Harris</vendor>
+
+    <description><![CDATA[
+        Cyclomatic complexity diagnostics and hover for Rust.
+        <p>
+        Functions scoring at or above the configured threshold are reported as
+        warnings; at or above twice the threshold, as errors. Hovering a
+        function's signature or one of its branchy lines explains the score.
+        </p>
+        <p>
+        Requires the <code>rustcx</code> binary on your <code>PATH</code>
+        (<code>cargo install --path .</code>), or an explicit path set under
+        <b>Settings | Tools | rustcx</b>.
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- The LSP API is only present in paid JetBrains IDEs. This dependency is
+         what keeps the plugin from being installable where it cannot work. -->
+    <depends>com.intellij.modules.lsp</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <platform.lsp.integrationProvider
+                implementation="dev.rustcx.intellij.RustcxLspIntegrationProvider"/>
+
+        <applicationConfigurable
+                parentId="tools"
+                id="dev.rustcx.intellij.settings"
+                displayName="rustcx"
+                instance="dev.rustcx.intellij.RustcxConfigurable"/>
+
+        <notificationGroup id="rustcx" displayType="BALLOON"/>
+    </extensions>
+</idea-plugin>
