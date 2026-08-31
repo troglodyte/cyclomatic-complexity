@@ -27,18 +27,16 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// The text is deliberately not kept. Full sync means every change carries the
 /// whole buffer, so there is nothing to reconstruct, and the UTF-16 line widths
 /// diagnostics need are computed at publish time and discarded.
-// Task 3 is the first consumer; the allow goes away there.
-#[allow(dead_code)]
 #[derive(Default)]
 struct Doc {
     funcs: Vec<crate::analyze::Func>,
-    /// The last parse error logged for this document, for dedupe. Task 5.
+    /// The last parse error logged for this document, for dedupe. Task 5 is
+    /// the first consumer; the allow goes away there.
+    #[allow(dead_code)]
     last_error: Option<String>,
 }
 
 struct Server {
-    /// Task 3 is the first consumer; the allow goes away there.
-    #[allow(dead_code)]
     docs: HashMap<String, Doc>,
     /// `initializationOptions`, which win over the file.
     init: FileConfig,
@@ -64,8 +62,6 @@ impl Server {
     }
 
     /// The score at which a function warns. Errors at twice this.
-    /// Task 3 is the first non-test consumer; the allow goes away there.
-    #[allow(dead_code)]
     fn threshold(&self) -> u32 {
         self.settings().threshold.unwrap_or(DEFAULT_THRESHOLD)
     }
@@ -107,6 +103,35 @@ impl Server {
                 "hoverProvider": true,
             }
         })
+    }
+
+    fn publish(&mut self, uri: &str, diagnostics: Vec<serde_json::Value>) -> io::Result<()> {
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": { "uri": uri, "diagnostics": diagnostics },
+        }))
+    }
+
+    /// Analyze a document and publish. A parse failure publishes nothing —
+    /// Task 5 adds the logging that explains why.
+    fn update(&mut self, uri: &str, text: &str) -> io::Result<()> {
+        // Pick up an edited rustcx.toml before using its settings.
+        if let Some(e) = self.config.refresh() {
+            self.log(&format!("config: {e}"))?;
+        }
+        let settings = self.settings();
+        let result = crate::analyze::analyze(text, settings.options());
+        // The thread-local span table retains the text of every file parsed on
+        // this thread, so it is cleared after every analysis — the same
+        // invariant `score_into` holds in main.rs. A long-lived server makes
+        // this load-bearing rather than merely tidy.
+        proc_macro2::extra::invalidate_current_thread_spans();
+
+        let Ok(funcs) = result else { return Ok(()) };
+        let diagnostics = diagnostics_for(&funcs, text, self.threshold());
+        self.docs.entry(uri.to_string()).or_default().funcs = funcs;
+        self.publish(uri, diagnostics)
     }
 
     /// `window/logMessage` at type 4 (`Log`) — the client's language-server
@@ -239,6 +264,34 @@ pub fn run() -> io::Result<()> {
                 }
             }
             "exit" => return Ok(()),
+            "textDocument/didOpen" => {
+                if let (Some(uri), Some(text)) = (
+                    params["textDocument"]["uri"].as_str().map(str::to_string),
+                    params["textDocument"]["text"].as_str().map(str::to_string),
+                ) {
+                    server.update(&uri, &text)?;
+                }
+            }
+            "textDocument/didChange" => {
+                // Full sync: one change carrying the entire buffer.
+                if let (Some(uri), Some(text)) = (
+                    params["textDocument"]["uri"].as_str().map(str::to_string),
+                    params["contentChanges"][0]["text"].as_str().map(str::to_string),
+                ) {
+                    server.update(&uri, &text)?;
+                }
+            }
+            "textDocument/didSave" => {
+                // Under full sync the buffer already arrived via didChange, and
+                // `text` is only present if the client opted into sending it.
+                // Nothing to do. (jscx reads a `text` that never comes.)
+            }
+            "textDocument/didClose" => {
+                if let Some(uri) = params["textDocument"]["uri"].as_str().map(str::to_string) {
+                    server.docs.remove(&uri);
+                    server.publish(&uri, Vec::new())?;
+                }
+            }
             _ => {
                 // A request carries an id and a client waits on it; ignoring one
                 // can hang the client. A notification is owed no reply.
@@ -249,6 +302,44 @@ pub fn run() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build the diagnostics for one analyzed document.
+fn diagnostics_for(
+    funcs: &[crate::analyze::Func],
+    text: &str,
+    threshold: u32,
+) -> Vec<serde_json::Value> {
+    // LSP character offsets are UTF-16 code units, not bytes or chars.
+    let widths: Vec<u32> = text
+        .lines()
+        .map(|l| l.chars().map(char::len_utf16).sum::<usize>() as u32)
+        .collect();
+
+    funcs
+        .iter()
+        .filter(|f| f.complexity >= threshold)
+        .map(|f| {
+            // Func.line is 1-based; LSP lines are 0-based.
+            let row = f.line.saturating_sub(1);
+            let end = widths.get(row as usize).copied().unwrap_or(0);
+            let severity = if f.complexity >= threshold.saturating_mul(2) { 1 } else { 2 };
+            serde_json::json!({
+                "range": {
+                    "start": { "line": row, "character": 0 },
+                    "end": { "line": row, "character": end },
+                },
+                "severity": severity,
+                "source": "rustcx",
+                "message": format!(
+                    "Complexity is {} for {} '{}'",
+                    f.complexity,
+                    f.kind.label(),
+                    f.name
+                ),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -316,4 +407,78 @@ mod tests {
         server.init = FileConfig::default();
         assert_eq!(server.threshold(), DEFAULT_THRESHOLD);
     }
+
+    use crate::analyze::{analyze, Options};
+
+    /// A function whose complexity is `1 + branches`, all on one line.
+    fn one_liner(name: &str, branches: usize) -> String {
+        format!("fn {name}(a: bool) {{ {} }}", "if a {} ".repeat(branches))
+    }
+
+    fn diags(src: &str, threshold: u32) -> Vec<serde_json::Value> {
+        let funcs = analyze(src, Options::default()).expect("fixture parses");
+        diagnostics_for(&funcs, src, threshold)
+    }
+
+    #[test]
+    fn only_functions_at_or_above_the_threshold_are_reported() {
+        let src = format!("{}\n{}\n", one_liner("small", 1), one_liner("big", 9));
+        let d = diags(&src, 5);
+        assert_eq!(d.len(), 1, "complexity 2 is below the threshold, 10 is not");
+        assert!(d[0]["message"].as_str().unwrap().contains("big"));
+    }
+
+    #[test]
+    fn the_severity_boundaries_are_exact() {
+        // Warning at exactly the threshold.
+        let at = diags(&one_liner("f", 4), 5);
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0]["severity"], 2, "complexity 5 at threshold 5 warns");
+
+        // Error at exactly twice it.
+        let twice = diags(&one_liner("f", 9), 5);
+        assert_eq!(twice[0]["severity"], 1, "complexity 10 at threshold 5 errors");
+
+        // And one below twice is still a warning.
+        let under = diags(&one_liner("f", 8), 5);
+        assert_eq!(under[0]["severity"], 2, "complexity 9 at threshold 5 warns");
+    }
+
+    #[test]
+    fn a_diagnostic_names_the_kind_and_the_function() {
+        let d = diags(&one_liner("parse_args", 9), 5);
+        assert_eq!(
+            d[0]["message"], "Complexity is 10 for fn 'parse_args'",
+            "the message format matches jscx exactly"
+        );
+        assert_eq!(d[0]["source"], "rustcx");
+    }
+
+    #[test]
+    fn the_range_covers_the_function_line_in_utf16_units() {
+        // A line whose byte length, char count, and UTF-16 length all differ.
+        let src = format!("// \u{1F980}\u{1F980} a four-byte crab is two UTF-16 units\n{}\n", one_liner("f", 9));
+        let d = diags(&src, 5);
+
+        assert_eq!(d[0]["range"]["start"]["line"], 1, "0-based: the second line");
+        assert_eq!(d[0]["range"]["start"]["character"], 0);
+
+        let expected: usize = src.lines().nth(1).unwrap().chars().map(char::len_utf16).sum();
+        assert_eq!(
+            d[0]["range"]["end"]["character"], expected,
+            "columns are UTF-16 code units, not bytes and not chars"
+        );
+    }
+
+    #[test]
+    fn a_closure_gets_its_own_diagnostic() {
+        let src = format!(
+            "fn outer() {{ let f = |a: bool| {{ {} }}; }}\n",
+            "if a {} ".repeat(9)
+        );
+        let d = diags(&src, 5);
+        assert_eq!(d.len(), 1, "the closure is scored independently of its parent");
+        assert!(d[0]["message"].as_str().unwrap().contains("closure"));
+    }
+
 }

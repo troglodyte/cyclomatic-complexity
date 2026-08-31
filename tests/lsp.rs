@@ -138,3 +138,93 @@ fn a_malformed_frame_does_not_take_the_server_down() {
     s.send(json!({ "jsonrpc": "2.0", "id": 5, "method": "shutdown" }));
     assert_eq!(s.recv()["id"], 5);
 }
+
+impl Server {
+    fn did_open(&mut self, uri: &str, text: &str) {
+        self.send(json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": { "uri": uri, "languageId": "rust", "version": 1, "text": text } }
+        }));
+    }
+
+    fn did_change(&mut self, uri: &str, text: &str) {
+        self.send(json!({
+            "jsonrpc": "2.0", "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": text } ]
+            }
+        }));
+    }
+
+    /// The next `publishDiagnostics`, skipping any log messages.
+    fn diagnostics(&mut self) -> Value {
+        loop {
+            let msg = self.recv();
+            if msg["method"] == "textDocument/publishDiagnostics" {
+                return msg["params"].clone();
+            }
+        }
+    }
+}
+
+/// A function of complexity `1 + branches`, on its own line.
+fn branchy(name: &str, branches: usize) -> String {
+    format!("fn {name}(a: bool) {{ {} }}\n", "if a {} ".repeat(branches))
+}
+
+#[test]
+fn opening_a_document_publishes_diagnostics() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", &format!("{}{}", branchy("small", 1), branchy("big", 21)));
+
+    let params = s.diagnostics();
+    assert_eq!(params["uri"], "file:///x.rs");
+    let list = params["diagnostics"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "only `big` is over the default threshold of 11");
+    assert_eq!(list[0]["message"], "Complexity is 22 for fn 'big'");
+    assert_eq!(list[0]["severity"], 1, "22 is at least twice 11");
+}
+
+#[test]
+fn a_change_republishes() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", &branchy("f", 20));
+    assert_eq!(s.diagnostics()["diagnostics"].as_array().unwrap().len(), 1);
+
+    s.did_change("file:///x.rs", &branchy("f", 1));
+    assert!(
+        s.diagnostics()["diagnostics"].as_array().unwrap().is_empty(),
+        "an empty list is how a client is told the warnings are gone"
+    );
+}
+
+#[test]
+fn the_threshold_comes_from_initialization_options() {
+    let mut s = Server::start();
+    s.send(json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "rootUri": null, "capabilities": {}, "initializationOptions": { "threshold": 3 } }
+    }));
+    s.recv();
+
+    s.did_open("file:///x.rs", &branchy("f", 3));
+    let list = s.diagnostics()["diagnostics"].as_array().unwrap().clone();
+    assert_eq!(list.len(), 1, "complexity 4 is over a threshold of 3");
+}
+
+#[test]
+fn closing_a_document_clears_its_diagnostics() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", &branchy("f", 20));
+    assert_eq!(s.diagnostics()["diagnostics"].as_array().unwrap().len(), 1);
+
+    s.send(json!({
+        "jsonrpc": "2.0", "method": "textDocument/didClose",
+        "params": { "textDocument": { "uri": "file:///x.rs" } }
+    }));
+    assert!(s.diagnostics()["diagnostics"].as_array().unwrap().is_empty());
+}
