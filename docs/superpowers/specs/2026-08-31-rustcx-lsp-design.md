@@ -51,17 +51,17 @@ pub const DEFAULT_THRESHOLD: u32 = 11;
 pub fn run() -> std::io::Result<()>;
 
 // src/config.rs
-pub struct Config {
+pub struct FileConfig {
     pub max: Option<u32>,
     pub threshold: Option<u32>,
     pub question: Option<bool>,
     pub logical: Option<bool>,
     pub tests: Option<bool>,
 }
-impl Config {
+impl FileConfig {
     /// Walk up from `start` to the filesystem root, loading the first
     /// `rustcx.toml` found. `Ok(None)` when there is none.
-    pub fn discover(start: &Path) -> Result<Option<(PathBuf, Config)>, ConfigError>;
+    pub fn discover(start: &Path) -> Result<Option<(PathBuf, FileConfig)>, ConfigError>;
     /// Analyzer options with this config layered over the built-in defaults.
     pub fn options(&self) -> Options;
 }
@@ -330,7 +330,7 @@ config that does not work. Those extensions stay out of scope.
 
 ## Build order
 
-1. `src/config.rs` — `Config`, discovery, precedence, reload. Testable with no
+1. `src/config.rs` — `FileConfig`, discovery, precedence, reload. Testable with no
    protocol involved.
 2. `--lsp` flag and `src/lsp.rs` framing, dispatch, `initialize`/`shutdown`/
    `exit`. Verified by `tests/lsp.rs` before any feature exists.
