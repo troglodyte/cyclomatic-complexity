@@ -1,7 +1,9 @@
 use colored::Colorize;
 use rustcx::analyze::{Func, Options};
+use serde::Serialize;
+use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const HELP: &str = "\
@@ -201,9 +203,202 @@ fn write_table<W: Write>(
     writeln!(w)
 }
 
+
+const SKIP_DIRS: &[&str] = &["target", ".git", ".hg", ".svn", ".jj"];
+
+fn is_source(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "rs")
+}
+
+/// Recursively collect `.rs` files under `root`, skipping build and VCS dirs.
+fn collect(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(root)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            let skip = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| SKIP_DIRS.contains(&n));
+            if !skip {
+                collect(&path, out)?;
+            }
+        } else if is_source(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Filter and order rows for display.
+///
+/// `--min` drops low scores, `--top` keeps the N worst, and `--sort` orders by
+/// score descending. Without `--sort` the surviving rows are restored to source
+/// order so the table still reads file by file.
+fn select(rows: Vec<Row>, cfg: &Config) -> Vec<Row> {
+    let mut kept: Vec<(usize, Row)> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(_, r)| r.func.complexity >= cfg.min)
+        .collect();
+
+    if cfg.top.is_some() || cfg.sort {
+        kept.sort_by(|a, b| b.1.func.complexity.cmp(&a.1.func.complexity));
+    }
+    if let Some(n) = cfg.top {
+        kept.truncate(n);
+    }
+    if !cfg.sort {
+        kept.sort_by_key(|(i, _)| *i);
+    }
+    kept.into_iter().map(|(_, r)| r).collect()
+}
+
+#[derive(Serialize)]
+struct JsonFunc<'a> {
+    file: &'a str,
+    #[serde(flatten)]
+    func: &'a Func,
+}
+
+#[derive(Serialize)]
+struct JsonWorst<'a> {
+    file: &'a str,
+    name: &'a str,
+    line: u32,
+    complexity: u32,
+}
+
+#[derive(Serialize)]
+struct JsonSummary<'a> {
+    functions: usize,
+    files: usize,
+    mean: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worst: Option<JsonWorst<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonReport<'a> {
+    functions: Vec<JsonFunc<'a>>,
+    summary: JsonSummary<'a>,
+}
+
+fn write_json<W: Write>(w: &mut W, rows: &[Row], summary: &Summary) -> io::Result<()> {
+    let report = JsonReport {
+        functions: rows
+            .iter()
+            .map(|r| JsonFunc { file: &r.file, func: &r.func })
+            .collect(),
+        summary: JsonSummary {
+            functions: summary.funcs,
+            files: summary.files,
+            mean: summary.mean,
+            worst: summary.worst.as_ref().map(|r| JsonWorst {
+                file: &r.file,
+                name: &r.func.name,
+                line: r.func.line,
+                complexity: r.func.complexity,
+            }),
+        },
+    };
+    serde_json::to_writer(&mut *w, &report).map_err(io::Error::other)?;
+    writeln!(w)
+}
+
+fn run(cfg: &Config) -> ExitCode {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut trouble = false;
+
+    if cfg.stdin {
+        let mut src = String::new();
+        if let Err(e) = io::Read::read_to_string(&mut io::stdin(), &mut src) {
+            eprintln!("rustcx: <stdin>: {e}");
+            return ExitCode::from(2);
+        }
+        trouble |= !score_into(&mut rows, "<stdin>", &src, cfg);
+    }
+
+    // Expand the paths given on the command line. A file named explicitly is
+    // read whatever its extension; a directory is walked for `.rs`.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in &cfg.paths {
+        if p.is_dir() {
+            if let Err(e) = collect(p, &mut files) {
+                eprintln!("rustcx: {}: {e}", p.display());
+                trouble = true;
+            }
+        } else {
+            files.push(p.clone());
+        }
+    }
+
+    for path in &files {
+        match fs::read_to_string(path) {
+            Ok(src) => {
+                let name = path.display().to_string();
+                trouble |= !score_into(&mut rows, &name, &src, cfg);
+            }
+            Err(e) => {
+                eprintln!("rustcx: {}: {e}", path.display());
+                trouble = true;
+            }
+        }
+    }
+
+    let rows = select(rows, cfg);
+    let summary = summarize(&rows);
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+    let wrote = if cfg.json {
+        write_json(&mut w, &rows, &summary)
+    } else {
+        write_table(&mut w, &rows, &summary, cfg.header, cfg.explain)
+    };
+    if wrote.is_err() {
+        return ExitCode::from(2);
+    }
+
+    if trouble {
+        return ExitCode::from(2);
+    }
+    if let Some(max) = cfg.max {
+        if rows.iter().any(|r| r.func.complexity > max) {
+            return ExitCode::from(1);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Analyze one source and append its rows. Returns false on a parse error.
+///
+/// This function owns the span-lifetime invariant: `analyze` resolves every
+/// span to a line before returning, so the thread-local span table — which
+/// otherwise retains the full text of every file ever parsed — is cleared here.
+/// Nothing borrowed from the AST may outlive this call.
+fn score_into(rows: &mut Vec<Row>, name: &str, src: &str, cfg: &Config) -> bool {
+    let result = rustcx::analyze::analyze(src, cfg.opts);
+    proc_macro2::extra::invalidate_current_thread_spans();
+    match result {
+        Ok(funcs) => {
+            for func in funcs {
+                rows.push(Row { file: name.to_string(), func });
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("rustcx: {}:{}: parse error: {}", name, e.line, e.message);
+            false
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let _cfg = match parse_args(&args) {
+    let cfg = match parse_args(&args) {
         Ok(Some(cfg)) => cfg,
         Ok(None) => return ExitCode::SUCCESS,
         Err(msg) => {
@@ -211,7 +406,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    ExitCode::SUCCESS
+    run(&cfg)
 }
 
 #[cfg(test)]
@@ -362,5 +557,77 @@ src/b.rs
     fn empty_input_reports_nothing_found() {
         let out = render(&[], true, false);
         assert_eq!(out, "0 functions in 0 files\n");
+    }
+
+    fn selected(cfg: Config, rows: Vec<Row>) -> Vec<(String, u32)> {
+        select(rows, &cfg).into_iter().map(|r| (r.func.name, r.func.complexity)).collect()
+    }
+
+    fn spread() -> Vec<Row> {
+        vec![
+            Row { file: "a.rs".into(), func: func("low", FnKind::Fn, 1, 1, 0) },
+            Row { file: "a.rs".into(), func: func("high", FnKind::Fn, 2, 9, 0) },
+            Row { file: "b.rs".into(), func: func("mid", FnKind::Fn, 3, 5, 0) },
+        ]
+    }
+
+    #[test]
+    fn min_filters_below_the_threshold() {
+        let cfg = Config { min: 5, ..Config::default() };
+        assert_eq!(selected(cfg, spread()), [("high".to_string(), 9), ("mid".to_string(), 5)]);
+    }
+
+    #[test]
+    fn min_of_one_keeps_everything_in_source_order() {
+        let cfg = Config::default();
+        let names: Vec<String> = selected(cfg, spread()).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["low", "high", "mid"]);
+    }
+
+    #[test]
+    fn sort_orders_by_score_descending() {
+        let cfg = Config { sort: true, ..Config::default() };
+        let names: Vec<String> = selected(cfg, spread()).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["high", "mid", "low"]);
+    }
+
+    #[test]
+    fn top_keeps_the_n_worst_and_restores_source_order() {
+        // --top picks the worst 2, but without --sort they print in source
+        // order so the table still reads file by file.
+        let cfg = Config { top: Some(2), ..Config::default() };
+        let names: Vec<String> = selected(cfg, spread()).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["high", "mid"]);
+    }
+
+    #[test]
+    fn top_with_sort_stays_sorted() {
+        let cfg = Config { top: Some(2), sort: true, ..Config::default() };
+        let names: Vec<String> = selected(cfg, spread()).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["high", "mid"]);
+    }
+
+    #[test]
+    fn json_carries_every_row_and_the_summary() {
+        let mut rows = sample();
+        rows[0].func.points = vec![Point { line: 13, branch: "if" }];
+        let mut out = Vec::new();
+        let s = summarize(&rows);
+        write_json(&mut out, &rows, &s).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(v["functions"].as_array().unwrap().len(), 3);
+        assert_eq!(v["functions"][0]["file"], "src/a.rs");
+        assert_eq!(v["functions"][0]["name"], "validate");
+        assert_eq!(v["functions"][0]["kind"], "fn");
+        assert_eq!(v["functions"][0]["complexity"], 14);
+        assert_eq!(v["functions"][0]["line"], 12);
+        assert_eq!(v["functions"][0]["depth"], 0);
+        assert_eq!(v["functions"][0]["points"][0]["branch"], "if");
+        assert_eq!(v["functions"][1]["kind"], "closure");
+
+        assert_eq!(v["summary"]["functions"], 3);
+        assert_eq!(v["summary"]["files"], 2);
+        assert_eq!(v["summary"]["worst"]["name"], "validate");
     }
 }
