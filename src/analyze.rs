@@ -96,11 +96,33 @@ struct Walker {
     /// last. A decision point is credited to the innermost frame only, which is
     /// what makes nested functions score independently.
     stack: Vec<usize>,
+    /// Enclosing `impl` or `trait` type names, for qualifying method names.
+    type_stack: Vec<String>,
+    /// Name to give the next closure visited. Set by the parent expression
+    /// immediately before descending into the closure, consumed by
+    /// `visit_expr_closure`.
+    closure_name: Option<String>,
 }
 
 impl Walker {
     fn new(opts: Options) -> Self {
-        Walker { opts, funcs: Vec::new(), stack: Vec::new() }
+        Walker {
+            opts,
+            funcs: Vec::new(),
+            stack: Vec::new(),
+            type_stack: Vec::new(),
+            closure_name: None,
+        }
+    }
+
+    /// `Type::method` when inside an impl or trait, otherwise the bare name.
+    /// Module paths are deliberately not prefixed — the file path is already
+    /// printed above the table.
+    fn qualified(&self, ident: &syn::Ident) -> String {
+        match self.type_stack.last() {
+            Some(ty) => format!("{}::{}", ty, ident),
+            None => ident.to_string(),
+        }
     }
 
     fn open(&mut self, name: String, kind: FnKind, span: Span) {
@@ -141,6 +163,9 @@ impl Walker {
 
 impl<'ast> Visit<'ast> for Walker {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !self.opts.tests && has_test_attr(&node.attrs) {
+            return;
+        }
         self.open(node.sig.ident.to_string(), FnKind::Fn, node.sig.fn_token.span);
         visit::visit_item_fn(self, node);
         self.close();
@@ -222,6 +247,14 @@ impl<'ast> Visit<'ast> for Walker {
             if init.diverge.is_some() {
                 self.point(node.let_token.span, "let else");
             }
+            // `let render = |x| ...` names the closure `render`. A typed
+            // binding (`let f: Box<dyn Fn()> = ...`) is a Pat::Type, not a
+            // Pat::Ident, and falls through to the callee rule.
+            if matches!(&*init.expr, syn::Expr::Closure(_)) {
+                if let syn::Pat::Ident(id) = &node.pat {
+                    self.closure_name = Some(id.ident.to_string());
+                }
+            }
         }
         visit::visit_local(self, node);
     }
@@ -233,6 +266,84 @@ impl<'ast> Visit<'ast> for Walker {
             self.point(node.question_token.spans[0], "?");
         }
         visit::visit_expr_try(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.type_stack.push(type_name(&node.self_ty));
+        visit::visit_item_impl(self, node);
+        self.type_stack.pop();
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.type_stack.push(node.ident.to_string());
+        visit::visit_item_trait(self, node);
+        self.type_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !self.opts.tests && has_test_attr(&node.attrs) {
+            return;
+        }
+        let name = self.qualified(&node.sig.ident);
+        self.open(name, FnKind::Method, node.sig.fn_token.span);
+        visit::visit_impl_item_fn(self, node);
+        self.close();
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        // A signature with no default body is not a function.
+        if node.default.is_none() {
+            return;
+        }
+        let name = self.qualified(&node.sig.ident);
+        self.open(name, FnKind::TraitFn, node.sig.fn_token.span);
+        visit::visit_trait_item_fn(self, node);
+        self.close();
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        // syn 3 calls the pipes `inputs_begin` / `inputs_end`, and they are
+        // punctuation, so the span lives in `.spans[0]`.
+        let name = self.closure_name.take().unwrap_or_else(|| "closure".to_string());
+        self.open(name, FnKind::Closure, node.inputs_begin.spans[0]);
+        visit::visit_expr_closure(self, node);
+        self.close();
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.visit_expr(&node.receiver);
+        for arg in &node.args {
+            if matches!(arg, syn::Expr::Closure(_)) {
+                self.closure_name = Some(node.method.to_string());
+            }
+            self.visit_expr(arg);
+        }
+        // Turbofish generics are types; they hold no decision points.
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.visit_expr(&node.func);
+        let callee = callee_name(&node.func);
+        for arg in &node.args {
+            if matches!(arg, syn::Expr::Closure(_)) {
+                self.closure_name = callee.clone();
+            }
+            self.visit_expr(arg);
+        }
+    }
+
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        if matches!(&node.expr, syn::Expr::Closure(_)) {
+            self.closure_name = Some(member_name(&node.member));
+        }
+        visit::visit_field_value(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !self.opts.tests && is_cfg_test(&node.attrs) {
+            return;
+        }
+        visit::visit_item_mod(self, node);
     }
 }
 
@@ -246,6 +357,61 @@ fn is_catch_all(pat: &syn::Pat) -> bool {
         syn::Pat::Ident(id) => id.subpat.is_none(),
         _ => false,
     }
+}
+
+/// The last path segment of an impl's self type: `Walker<'a>` becomes `Walker`.
+///
+/// Without syn's `printing` feature there is no `ToTokens`, so unusual self
+/// types are not stringified; they fall back to `impl`.
+fn type_name(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "impl".to_string()),
+        syn::Type::Reference(r) => type_name(&r.elem),
+        _ => "impl".to_string(),
+    }
+}
+
+fn member_name(m: &syn::Member) -> String {
+    match m {
+        syn::Member::Named(id) => id.to_string(),
+        syn::Member::Unnamed(i) => i.index.to_string(),
+    }
+}
+
+/// The last path segment of a call's callee, when it is a plain path.
+fn callee_name(f: &syn::Expr) -> Option<String> {
+    match f {
+        syn::Expr::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("test"))
+}
+
+/// Recognises `#[cfg(test)]`. A compound predicate such as
+/// `#[cfg(all(test, feature = "x"))]` is not recognised — a documented
+/// limitation, since the common case is the bare form.
+fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        if !a.path().is_ident("cfg") {
+            return false;
+        }
+        let mut found = false;
+        let _ = a.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
 }
 
 #[cfg(test)]
@@ -446,5 +612,150 @@ fn handle(window: Option<u8>, ev: Event) -> Result<(), ()> {
         // 1 base + let-else + (arm+guard) + (arm+alt) + (arm+guard+&&) + arm
         // + catch-all(0) + ?(0) = 10
         assert_eq!(out[0].complexity, 10);
+    }
+
+    fn rows(src: &str) -> Vec<(String, &'static str, u32, u32)> {
+        analyze(src, Options::default())
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.kind.label(), f.complexity, f.depth))
+            .collect()
+    }
+
+    fn names(src: &str) -> Vec<String> {
+        analyze(src, Options::default()).unwrap().into_iter().map(|f| f.name).collect()
+    }
+
+    #[test]
+    fn impl_methods_are_named_for_their_type() {
+        let src = "struct S; impl S { fn m(&self, a: bool) { if a { } } }";
+        assert_eq!(rows(src), [("S::m".to_string(), "method", 2, 0)]);
+    }
+
+    #[test]
+    fn trait_defaults_are_scored_and_bare_signatures_are_not() {
+        let src = "trait T { fn required(&self); fn provided(&self, a: bool) { if a { } } }";
+        assert_eq!(rows(src), [("T::provided".to_string(), "trait fn", 2, 0)]);
+    }
+
+    #[test]
+    fn a_closure_gets_its_own_row_and_the_parent_is_not_charged() {
+        let src = "fn f(v: &[i32]) { v.iter().map(|x| if *x > 0 { 1 } else { 0 }); }";
+        let out = rows(src);
+        assert_eq!(out[0].0, "f");
+        assert_eq!(out[0].2, 1, "parent must not be charged for the closure's if");
+        assert_eq!(out[1].1, "closure");
+        assert_eq!(out[1].2, 2);
+        assert_eq!(out[1].3, 1, "closure nests one level inside f");
+    }
+
+    #[test]
+    fn nested_functions_score_independently() {
+        let src = "fn outer(a: bool) { fn inner(b: bool) { if b { } } if a { } }";
+        let out = rows(src);
+        assert_eq!(out[0].0, "outer");
+        assert_eq!(out[0].2, 2);
+        assert_eq!(out[1].0, "inner");
+        assert_eq!(out[1].2, 2);
+        assert_eq!(out[1].3, 1);
+    }
+
+    #[test]
+    fn rows_come_back_in_source_order_with_children_after_parents() {
+        let src = "fn a() { let _c = || (); } fn b() {}";
+        let names: Vec<String> = rows(src).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["a", "_c", "b"]);
+    }
+
+    #[test]
+    fn the_spec_worked_example_scores_ten() {
+        let src = r#"
+enum Event { Key(Key), Click, Drag, Resize(i32, i32) }
+struct Key { ctrl: bool }
+struct App { window: Option<u8> }
+impl App {
+    fn handle(&mut self, ev: Event) -> Result<(), ()> {
+        let Some(_w) = self.window else { return Ok(()) };
+        match ev {
+            Event::Key(k) if k.ctrl => self.command(k),
+            Event::Click | Event::Drag => self.pointer(ev),
+            Event::Resize(a, b) if a > 0 && b > 0 => self.fit(),
+            Event::Resize(..) => Ok(()),
+            _ => self.ignore(),
+        }?;
+        Ok(())
+    }
+    fn command(&self, _k: Key) -> Result<(), ()> { Ok(()) }
+    fn pointer(&self, _e: Event) -> Result<(), ()> { Ok(()) }
+    fn fit(&self) -> Result<(), ()> { Ok(()) }
+    fn ignore(&self) -> Result<(), ()> { Ok(()) }
+}
+"#;
+        let out = analyze(src, Options::default()).unwrap();
+        let handle = out.iter().find(|f| f.name == "App::handle").unwrap();
+        assert_eq!(handle.complexity, 10);
+    }
+
+    #[test]
+    fn a_closure_takes_the_name_of_its_let_binding() {
+        assert_eq!(names("fn f() { let render = |x: u8| x; }"), ["f", "render"]);
+    }
+
+    #[test]
+    fn a_closure_takes_the_name_of_the_method_it_is_passed_to() {
+        assert_eq!(names("fn f(o: Option<u8>) -> u8 { o.unwrap_or_else(|| 0) }"),
+                   ["f", "unwrap_or_else"]);
+    }
+
+    #[test]
+    fn a_closure_takes_the_name_of_the_function_it_is_passed_to() {
+        // A closure passed to a plain call takes the callee's name, so the
+        // closure inside `f` is also called "g".
+        assert_eq!(names("fn g<F: Fn()>(_f: F) {} fn f() { g(|| ()); }"), ["g", "f", "g"]);
+    }
+
+    #[test]
+    fn a_closure_takes_the_name_of_the_struct_field_it_initializes() {
+        let src = "struct S<F> { on_click: F } fn f() { let _s = S { on_click: |x: u8| x }; }";
+        assert_eq!(names(src), ["f", "on_click"]);
+    }
+
+    #[test]
+    fn an_unattached_closure_falls_back_to_closure() {
+        assert_eq!(names("fn f() { (|x: u8| x)(1); }"), ["f", "closure"]);
+    }
+
+    const WITH_TESTS: &str = r#"
+fn real(a: bool) { if a { } }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t(a: bool) { if a { } }
+    fn helper(a: bool) { if a { } }
+}
+"#;
+
+    #[test]
+    fn test_code_is_scored_by_default() {
+        let names: Vec<String> = analyze(WITH_TESTS, Options::default())
+            .unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["real", "t", "helper"]);
+    }
+
+    #[test]
+    fn no_tests_skips_cfg_test_modules_entirely() {
+        let opts = Options { tests: false, ..Options::default() };
+        let names: Vec<String> = analyze(WITH_TESTS, opts)
+            .unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["real"]);
+    }
+
+    #[test]
+    fn no_tests_skips_a_bare_test_function_outside_a_test_module() {
+        let src = "fn real() {} #[test] fn t(a: bool) { if a { } }";
+        let opts = Options { tests: false, ..Options::default() };
+        let names: Vec<String> = analyze(src, opts)
+            .unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["real"]);
     }
 }
