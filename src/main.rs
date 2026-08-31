@@ -160,7 +160,7 @@ fn write_table<W: Write>(
             }
             writeln!(w, "{}", row.file.bold())?;
             if header {
-                writeln!(w, "{:>6}{:>7}  {:<13}{}", "CC", "Line", "Kind", "Name")?;
+                writeln!(w, "{:>6}{:>7}  {:<13}Name", "CC", "Line", "Kind")?;
             }
             current = &row.file;
         }
@@ -246,7 +246,7 @@ fn select(rows: Vec<Row>, cfg: &Config) -> Vec<Row> {
         .collect();
 
     if cfg.top.is_some() || cfg.sort {
-        kept.sort_by(|a, b| b.1.func.complexity.cmp(&a.1.func.complexity));
+        kept.sort_by_key(|(_, r)| std::cmp::Reverse(r.func.complexity));
     }
     if let Some(n) = cfg.top {
         kept.truncate(n);
