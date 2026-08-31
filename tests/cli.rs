@@ -129,3 +129,64 @@ fn json_output_parses() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert!(v["functions"].as_array().unwrap().len() >= 3);
 }
+
+#[test]
+fn explain_lists_branches_that_sum_to_the_score() {
+    let (stdout, _, code) = rustcx(&["--explain", "--min", "2", "fixtures/patterns.rs"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("match arm"), "got:\n{stdout}");
+    assert!(stdout.contains("guard"), "got:\n{stdout}");
+    assert!(stdout.contains("pattern alternative"), "got:\n{stdout}");
+
+    // describe scores 8, so it lists 7 decision points — the score is always
+    // 1 + the number of explain lines.
+    let after = stdout.split("describe").nth(1).unwrap();
+    let listed = after
+        .lines()
+        .skip(1)
+        .take_while(|l| l.starts_with("      "))
+        .count();
+    assert_eq!(listed, 7, "explain lines under describe:\n{after}");
+}
+
+#[test]
+fn question_flag_reaches_the_cli() {
+    let (plain, _, _) = rustcx(&["--json", "fixtures/patterns.rs"]);
+    let (with, _, _) = rustcx(&["--json", "--question", "fixtures/patterns.rs"]);
+    let p: serde_json::Value = serde_json::from_str(&plain).unwrap();
+    let q: serde_json::Value = serde_json::from_str(&with).unwrap();
+    let find = |v: &serde_json::Value| -> u64 {
+        v["functions"].as_array().unwrap().iter()
+            .find(|f| f["name"] == "parse").unwrap()["complexity"].as_u64().unwrap()
+    };
+    assert_eq!(find(&p), 1);
+    assert_eq!(find(&q), 3);
+}
+
+#[test]
+fn no_tests_flag_reaches_the_cli() {
+    let dir = std::env::temp_dir().join("rustcx-notests");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("m.rs"),
+        "pub fn real() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+    )
+    .unwrap();
+
+    let (with, _, _) = rustcx(&[dir.to_str().unwrap()]);
+    assert!(with.contains("2 functions"), "got:\n{with}");
+    let (without, _, _) = rustcx(&["--no-tests", dir.to_str().unwrap()]);
+    assert!(without.contains("1 function in"), "got:\n{without}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_ci_gate_reads_naturally() {
+    // The documented CI invocation: clean under a generous threshold, failing
+    // under a strict one, with the same output either way.
+    let (_, _, clean) = rustcx(&["--max", "10", "fixtures"]);
+    assert_eq!(clean, 0);
+    let (_, _, breach) = rustcx(&["--max", "2", "fixtures"]);
+    assert_eq!(breach, 1);
+}
