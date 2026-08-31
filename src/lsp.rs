@@ -254,6 +254,75 @@ fn read_message(stdin: &mut impl BufRead) -> io::Result<Option<serde_json::Value
     Ok(Some(serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)))
 }
 
+impl Server {
+    /// Handle a request — a message with an id, which a client is waiting on.
+    /// Every path must reply: an unanswered request can hang a client, which
+    /// is why the unknown-method arm sends an error rather than dropping it.
+    fn request(&mut self, method: &str, id: serde_json::Value, params: &serde_json::Value) -> io::Result<()> {
+        match method {
+            "initialize" => {
+                let result = self.initialize(params);
+                self.respond(id, result)
+            }
+            "shutdown" => self.respond(id, serde_json::Value::Null),
+            "textDocument/hover" => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_string();
+                // LSP positions are 0-based; Func.line is 1-based.
+                let line = params["position"]["line"].as_u64().unwrap_or(0) as u32 + 1;
+                let text = self.docs.get(&uri).and_then(|d| hover_at(&d.funcs, line));
+                let result = match text {
+                    Some(text) => serde_json::json!({
+                        "contents": { "kind": "markdown", "value": text }
+                    }),
+                    None => serde_json::Value::Null,
+                };
+                self.respond(id, result)
+            }
+            _ => self.respond_error(id, METHOD_NOT_FOUND, &format!("unknown method: {method}")),
+        }
+    }
+
+    /// Handle a notification — no id, so no reply is owed. An unknown one is
+    /// ignored, as the protocol requires. `exit` is handled by the loop.
+    fn notification(&mut self, method: &str, params: &serde_json::Value) -> io::Result<()> {
+        match method {
+            "textDocument/didOpen" => {
+                let text = params["textDocument"]["text"].as_str().map(str::to_string);
+                self.update_from(uri_of(params), text)
+            }
+            // Full sync: one change carrying the entire buffer.
+            "textDocument/didChange" => {
+                let text = params["contentChanges"][0]["text"].as_str().map(str::to_string);
+                self.update_from(uri_of(params), text)
+            }
+            // Under full sync the buffer already arrived via didChange, and
+            // `text` is only present if the client opted into sending it.
+            // Nothing to do. (jscx reads a `text` that never comes.)
+            "textDocument/didSave" => Ok(()),
+            "textDocument/didClose" => {
+                let Some(uri) = uri_of(params) else { return Ok(()) };
+                self.docs.remove(&uri);
+                self.publish(&uri, Vec::new())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Analyze, if the notification carried both the fields we need. A missing
+    /// field skips the frame: jscx unwraps here and panics on a malformed one.
+    fn update_from(&mut self, uri: Option<String>, text: Option<String>) -> io::Result<()> {
+        match (uri, text) {
+            (Some(uri), Some(text)) => self.update(&uri, &text),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The document URI a text-document notification is about.
+fn uri_of(params: &serde_json::Value) -> Option<String> {
+    params["textDocument"]["uri"].as_str().map(str::to_string)
+}
+
 /// Run the server until `exit` or end of input.
 pub fn run() -> io::Result<()> {
     let stdin = io::stdin();
@@ -264,71 +333,15 @@ pub fn run() -> io::Result<()> {
         let Some(method) = msg["method"].as_str().map(str::to_string) else {
             continue; // not a request or notification we can act on
         };
-        let id = msg.get("id").cloned();
+        if method == "exit" {
+            return Ok(());
+        }
         let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
-
-        match method.as_str() {
-            "initialize" => {
-                let result = server.initialize(&params);
-                if let Some(id) = id {
-                    server.respond(id, result)?;
-                }
-            }
-            "shutdown" => {
-                if let Some(id) = id {
-                    server.respond(id, serde_json::Value::Null)?;
-                }
-            }
-            "exit" => return Ok(()),
-            "textDocument/didOpen" => {
-                if let (Some(uri), Some(text)) = (
-                    params["textDocument"]["uri"].as_str().map(str::to_string),
-                    params["textDocument"]["text"].as_str().map(str::to_string),
-                ) {
-                    server.update(&uri, &text)?;
-                }
-            }
-            "textDocument/didChange" => {
-                // Full sync: one change carrying the entire buffer.
-                if let (Some(uri), Some(text)) = (
-                    params["textDocument"]["uri"].as_str().map(str::to_string),
-                    params["contentChanges"][0]["text"].as_str().map(str::to_string),
-                ) {
-                    server.update(&uri, &text)?;
-                }
-            }
-            "textDocument/didSave" => {
-                // Under full sync the buffer already arrived via didChange, and
-                // `text` is only present if the client opted into sending it.
-                // Nothing to do. (jscx reads a `text` that never comes.)
-            }
-            "textDocument/didClose" => {
-                if let Some(uri) = params["textDocument"]["uri"].as_str().map(str::to_string) {
-                    server.docs.remove(&uri);
-                    server.publish(&uri, Vec::new())?;
-                }
-            }
-            "textDocument/hover" => {
-                let Some(id) = id else { continue }; // a request always has one
-                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_string();
-                // LSP positions are 0-based; Func.line is 1-based.
-                let line = params["position"]["line"].as_u64().unwrap_or(0) as u32 + 1;
-                let text = server.docs.get(&uri).and_then(|d| hover_at(&d.funcs, line));
-                let result = match text {
-                    Some(text) => serde_json::json!({
-                        "contents": { "kind": "markdown", "value": text }
-                    }),
-                    None => serde_json::Value::Null,
-                };
-                server.respond(id, result)?;
-            }
-            _ => {
-                // A request carries an id and a client waits on it; ignoring one
-                // can hang the client. A notification is owed no reply.
-                if let Some(id) = id {
-                    server.respond_error(id, METHOD_NOT_FOUND, &format!("unknown method: {method}"))?;
-                }
-            }
+        // An id is what separates the two halves of JSON-RPC: a request is
+        // owed a reply, a notification is not.
+        match msg.get("id").cloned() {
+            Some(id) => server.request(&method, id, &params)?,
+            None => server.notification(&method, &params)?,
         }
     }
     Ok(())
