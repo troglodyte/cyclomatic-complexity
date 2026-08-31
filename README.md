@@ -140,22 +140,26 @@ Hover works on a function's signature line and on any line it was charged a
 point for. Those are the branchy lines, which are the ones worth hovering; a
 blank line inside a function answers nothing.
 
-### Neovim
+Four editor integrations live under `extensions/`, each with its own README:
 
-Neovim 0.11 or newer, for `vim.lsp.config`:
+| Editor | Directory | Install |
+| --- | --- | --- |
+| Neovim | [`extensions/nvim`](extensions/nvim/README.md) | Add the directory to your runtimepath, then `vim.lsp.enable("rustcx")` |
+| Zed | [`extensions/zed`](extensions/zed/README.md) | *Extensions → Install Dev Extension* |
+| JetBrains | [`extensions/jetbrains`](extensions/jetbrains/README.md) | `./gradlew buildPlugin`, then install the zip from disk |
+| VS Code | [`extensions/vscode`](extensions/vscode/README.md) | `vsce package`, then `code --install-extension` |
 
-```lua
-vim.lsp.config('rustcx', {
-  cmd = { 'rustcx', '--lsp' },
-  filetypes = { 'rust' },
-  root_markers = { 'Cargo.toml', '.git' },
-})
-vim.lsp.enable('rustcx')
-```
+All four run the same `rustcx --lsp` binary, resolve it the same way (`PATH`,
+then `~/.cargo/bin/rustcx`), and expose the same two settings: a threshold and
+an explicit binary path. Each sends a threshold **only if you set one**, so
+`rustcx.toml` governs by default in every editor.
+
+The JetBrains plugin needs a paid IDE — the IntelliJ LSP API does not exist in
+IDEA Community or Android Studio.
 
 ### Helix
 
-In `languages.toml`:
+Helix needs no extension. In `languages.toml`:
 
 ```toml
 [language-server.rustcx]
@@ -166,11 +170,6 @@ args = ["--lsp"]
 name = "rust"
 language-servers = ["rust-analyzer", "rustcx"]
 ```
-
-### VS Code and Zed
-
-Neither can attach an arbitrary stdio language server from settings alone —
-both need a small extension to register the binary. None is shipped here.
 
 ### While you type
 
