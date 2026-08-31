@@ -228,3 +228,43 @@ fn closing_a_document_clears_its_diagnostics() {
     }));
     assert!(s.diagnostics()["diagnostics"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn hover_returns_the_explain_breakdown() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", "fn describe(a: bool, b: bool) {\n    if a && b {}\n}\n");
+    s.diagnostics(); // drain the publish that follows didOpen
+
+    s.send(json!({
+        "jsonrpc": "2.0", "id": 9, "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": "file:///x.rs" },
+            "position": { "line": 0, "character": 3 }
+        }
+    }));
+    let reply = s.recv();
+    assert_eq!(reply["id"], 9);
+    let value = reply["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("describe"), "got: {value}");
+    assert!(value.contains("complexity 3"), "got: {value}");
+    assert_eq!(reply["result"]["contents"]["kind"], "markdown");
+}
+
+#[test]
+fn hover_on_an_unknown_document_is_null_not_an_error() {
+    let mut s = Server::start();
+    s.initialize();
+
+    s.send(json!({
+        "jsonrpc": "2.0", "id": 10, "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": "file:///never-opened.rs" },
+            "position": { "line": 0, "character": 0 }
+        }
+    }));
+    let reply = s.recv();
+    assert_eq!(reply["id"], 10);
+    assert!(reply["result"].is_null(), "a request must always be answered");
+    assert!(reply.get("error").is_none(), "but this is not an error");
+}

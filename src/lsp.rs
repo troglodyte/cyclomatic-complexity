@@ -292,6 +292,20 @@ pub fn run() -> io::Result<()> {
                     server.publish(&uri, Vec::new())?;
                 }
             }
+            "textDocument/hover" => {
+                let Some(id) = id else { continue }; // a request always has one
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default().to_string();
+                // LSP positions are 0-based; Func.line is 1-based.
+                let line = params["position"]["line"].as_u64().unwrap_or(0) as u32 + 1;
+                let text = server.docs.get(&uri).and_then(|d| hover_at(&d.funcs, line));
+                let result = match text {
+                    Some(text) => serde_json::json!({
+                        "contents": { "kind": "markdown", "value": text }
+                    }),
+                    None => serde_json::Value::Null,
+                };
+                server.respond(id, result)?;
+            }
             _ => {
                 // A request carries an id and a client waits on it; ignoring one
                 // can hang the client. A notification is owed no reply.
@@ -340,6 +354,29 @@ fn diagnostics_for(
             })
         })
         .collect()
+}
+
+/// The hover text for a 1-based source line, or `None` if that line is neither
+/// a function's signature nor one of its decision points.
+///
+/// `Func` carries a start line and no end line — adding one would break the
+/// field-for-field parity with jscx — so hover answers on the lines the
+/// analyzer already knows about. Conveniently, those are the branchy lines:
+/// exactly the ones worth hovering.
+///
+/// Where two functions match, the innermost wins, so hovering inside a closure
+/// reports the closure rather than its parent.
+fn hover_at(funcs: &[crate::analyze::Func], line: u32) -> Option<String> {
+    let f = funcs
+        .iter()
+        .filter(|f| f.line == line || f.points.iter().any(|p| p.line == line))
+        .max_by_key(|f| f.depth)?;
+
+    let mut out = format!("`{}` — {} complexity {}\n", f.name, f.kind.label(), f.complexity);
+    for p in &f.points {
+        out.push_str(&format!("\n- line {} — {}", p.line, p.branch));
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -479,6 +516,63 @@ mod tests {
         let d = diags(&src, 5);
         assert_eq!(d.len(), 1, "the closure is scored independently of its parent");
         assert!(d[0]["message"].as_str().unwrap().contains("closure"));
+    }
+
+
+    /// Three lines: a signature, a branch, a blank body line.
+    const SAMPLE: &str = "\
+fn describe(a: bool, b: bool) -> u8 {
+    if a && b { 1 } else { 0 }
+}
+";
+
+    fn hover(src: &str, line: u32) -> Option<String> {
+        let funcs = analyze(src, Options::default()).expect("fixture parses");
+        hover_at(&funcs, line)
+    }
+
+    #[test]
+    fn hovering_the_signature_line_gives_the_whole_breakdown() {
+        let text = hover(SAMPLE, 1).expect("the signature line answers");
+        assert!(text.contains("describe"), "names the function");
+        assert!(text.contains("complexity 3"), "1 + if + &&");
+        assert!(text.contains("if"), "lists the decision points");
+        assert!(text.contains("&&"));
+    }
+
+    #[test]
+    fn hovering_a_decision_point_line_also_answers() {
+        let text = hover(SAMPLE, 2).expect("a counted line answers");
+        assert!(text.contains("describe"));
+        assert!(text.contains("complexity 3"));
+    }
+
+    #[test]
+    fn hovering_an_uncounted_line_answers_nothing() {
+        assert!(
+            hover(SAMPLE, 3).is_none(),
+            "the closing brace is neither a signature nor a decision point"
+        );
+        assert!(hover(SAMPLE, 99).is_none(), "and neither is a line past the end");
+    }
+
+    #[test]
+    fn the_innermost_function_wins() {
+        // The closure's `if` is on the same line as the closure itself, and
+        // inside the parent's span. The closure is the useful answer.
+        let src = "fn outer() {\n    let f = |a: bool| if a { 1 } else { 0 };\n}\n";
+        let text = hover(src, 2).expect("line 2 answers");
+        assert!(
+            text.contains("closure"),
+            "the innermost function wins, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_function_with_no_branches_still_answers_on_its_signature() {
+        let text = hover("fn plain() {}\n", 1).expect("a score of 1 is still a score");
+        assert!(text.contains("complexity 1"));
+        assert!(text.contains("plain"));
     }
 
 }
