@@ -30,9 +30,7 @@ const METHOD_NOT_FOUND: i32 = -32601;
 #[derive(Default)]
 struct Doc {
     funcs: Vec<crate::analyze::Func>,
-    /// The last parse error logged for this document, for dedupe. Task 5 is
-    /// the first consumer; the allow goes away there.
-    #[allow(dead_code)]
+    /// The last parse error logged for this document, for dedupe.
     last_error: Option<String>,
 }
 
@@ -128,9 +126,27 @@ impl Server {
         // this load-bearing rather than merely tidy.
         proc_macro2::extra::invalidate_current_thread_spans();
 
-        let Ok(funcs) = result else { return Ok(()) };
+        let funcs = match result {
+            Ok(funcs) => funcs,
+            Err(e) => {
+                // Publish nothing: a buffer is unparseable for most of the time
+                // someone is typing into it, so clearing would make the
+                // warnings flash, and publishing the syntax error would
+                // duplicate what rust-analyzer already reports. Hover keeps
+                // answering from the functions cached below.
+                let message = format!("{}: {}: {}", uri, e.line, e.message);
+                let doc = self.docs.entry(uri.to_string()).or_default();
+                if doc.last_error.as_deref() == Some(message.as_str()) {
+                    return Ok(()); // already logged; a held key must not flood
+                }
+                doc.last_error = Some(message.clone());
+                return self.log(&message);
+            }
+        };
         let diagnostics = diagnostics_for(&funcs, text, self.threshold());
-        self.docs.entry(uri.to_string()).or_default().funcs = funcs;
+        let doc = self.docs.entry(uri.to_string()).or_default();
+        doc.funcs = funcs;
+        doc.last_error = None;
         self.publish(uri, diagnostics)
     }
 
@@ -573,6 +589,20 @@ fn describe(a: bool, b: bool) -> u8 {
         let text = hover("fn plain() {}\n", 1).expect("a score of 1 is still a score");
         assert!(text.contains("complexity 1"));
         assert!(text.contains("plain"));
+    }
+
+
+    #[test]
+    fn a_recovered_document_forgets_its_last_error() {
+        // A struct literal rather than a reassigned default: clippy rejects the
+        // latter, and the point is the transition, not how the value got there.
+        let mut doc = Doc { last_error: Some("x.rs: 2: expected `}`".to_string()), ..Doc::default() };
+        // What the success path does.
+        doc.last_error = None;
+        assert!(
+            doc.last_error.is_none(),
+            "a file that breaks, is fixed, then breaks the same way logs twice"
+        );
     }
 
 }

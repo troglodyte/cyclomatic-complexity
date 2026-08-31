@@ -268,3 +268,75 @@ fn hover_on_an_unknown_document_is_null_not_an_error() {
     assert!(reply["result"].is_null(), "a request must always be answered");
     assert!(reply.get("error").is_none(), "but this is not an error");
 }
+
+impl Server {
+    /// The next `window/logMessage`, skipping diagnostics.
+    fn log_message(&mut self) -> String {
+        loop {
+            let msg = self.recv();
+            if msg["method"] == "window/logMessage" {
+                return msg["params"]["message"].as_str().unwrap().to_string();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_parse_failure_keeps_the_last_good_diagnostics() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", &branchy("f", 20));
+    assert_eq!(s.diagnostics()["diagnostics"].as_array().unwrap().len(), 1);
+
+    // Mid-edit: an unclosed brace. Nothing may be published — the warnings on
+    // screen must not flash — but the failure is logged.
+    s.did_change("file:///x.rs", "fn f(a: bool) { if a {");
+    let logged = s.log_message();
+    assert!(logged.contains("rustcx"), "got: {logged}");
+
+    // The next well-formed change still publishes, proving nothing wedged.
+    s.did_change("file:///x.rs", &branchy("f", 1));
+    assert!(s.diagnostics()["diagnostics"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn hover_still_answers_from_the_last_good_parse() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", "fn describe(a: bool, b: bool) {\n    if a && b {}\n}\n");
+    s.diagnostics();
+
+    s.did_change("file:///x.rs", "fn describe(a: bool, b: bool) {\n    if a && b {");
+    s.log_message();
+
+    s.send(json!({
+        "jsonrpc": "2.0", "id": 11, "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": "file:///x.rs" },
+            "position": { "line": 0, "character": 3 }
+        }
+    }));
+    let value = s.recv()["result"]["contents"]["value"].as_str().unwrap().to_string();
+    assert!(value.contains("describe"), "hover survives an unparseable buffer");
+}
+
+#[test]
+fn an_identical_parse_error_is_logged_once() {
+    let mut s = Server::start();
+    s.initialize();
+    s.did_open("file:///x.rs", &branchy("f", 20));
+    s.diagnostics();
+
+    s.did_change("file:///x.rs", "fn f(a: bool) { if a {");
+    let first = s.log_message();
+
+    // The same broken text again: a held keystroke inside an unclosed brace
+    // must not write a line per character.
+    s.did_change("file:///x.rs", "fn f(a: bool) { if a {");
+    // Nothing is owed for that change, so the next message must be the reply to
+    // this shutdown — if a second log line were sent, this assert catches it.
+    s.send(json!({ "jsonrpc": "2.0", "id": 12, "method": "shutdown" }));
+    let next = s.recv();
+    assert_eq!(next["id"], 12, "a repeated identical error must not log again");
+    assert!(first.contains("rustcx"));
+}
