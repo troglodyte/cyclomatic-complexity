@@ -62,7 +62,25 @@ fn to_u32(value: &toml::Value) -> Option<u32> {
     value.as_integer().and_then(|n| u32::try_from(n).ok())
 }
 
+fn parse_table(path: &Path, text: &str) -> Result<toml::Table, ConfigError> {
+    text.parse().map_err(|e: toml::de::Error| ConfigError {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })
+}
+
 impl FileConfig {
+    /// Set `max`/`threshold` from `value`. `Ok(true)` means `key` was a limit.
+    fn set_limit(&mut self, key: &str, value: &toml::Value) -> Result<bool, String> {
+        let slot = match key {
+            "max" => &mut self.max,
+            "threshold" => &mut self.threshold,
+            _ => return Ok(false),
+        };
+        let n = to_u32(value).ok_or_else(|| format!("`{key}` must be a non-negative integer"))?;
+        *slot = Some(n);
+        Ok(true)
+    }
     fn set(&mut self, lang: Lang, key: &'static str, value: bool) {
         self.langs.entry(lang.id()).or_default().set(key, value);
     }
@@ -76,25 +94,12 @@ impl FileConfig {
             path: path.to_path_buf(),
             message,
         };
-        let table: toml::Table = text
-            .parse()
-            .map_err(|e: toml::de::Error| fail(e.to_string()))?;
+        let table = parse_table(path, text)?;
         let mut cfg = FileConfig::default();
         // Top-level keys first, so language tables override them whatever the file order.
         for (key, value) in &table {
             match key.as_str() {
-                "max" => {
-                    cfg.max = Some(
-                        to_u32(value)
-                            .ok_or_else(|| fail("`max` must be a non-negative integer".into()))?,
-                    )
-                }
-                "threshold" => {
-                    cfg.threshold =
-                        Some(to_u32(value).ok_or_else(|| {
-                            fail("`threshold` must be a non-negative integer".into())
-                        })?)
-                }
+                _ if cfg.set_limit(key, value).map_err(&fail)? => {}
                 _ if reg.by_id(key).is_some() && value.is_table() => {}
                 _ => {
                     let owners: Vec<_> = declaring_langs(reg.langs(), key).collect();
@@ -145,25 +150,12 @@ impl FileConfig {
             path: path.to_path_buf(),
             message,
         };
-        let table: toml::Table = text
-            .parse()
-            .map_err(|e: toml::de::Error| fail(e.to_string()))?;
+        let table = parse_table(path, text)?;
         let rust = reg.by_id(LEGACY_RUST_FILE.1);
         let mut cfg = FileConfig::default();
         for (key, value) in &table {
             match key.as_str() {
-                "max" => {
-                    cfg.max = Some(
-                        to_u32(value)
-                            .ok_or_else(|| fail("`max` must be a non-negative integer".into()))?,
-                    )
-                }
-                "threshold" => {
-                    cfg.threshold =
-                        Some(to_u32(value).ok_or_else(|| {
-                            fail("`threshold` must be a non-negative integer".into())
-                        })?)
-                }
+                _ if cfg.set_limit(key, value).map_err(&fail)? => {}
                 _ => {
                     let (lang, k) = rust
                         .and_then(|lang| declared_key(lang, key).map(|k| (lang, k)))
@@ -508,19 +500,15 @@ mod tests {
 
     #[test]
     fn a_wrong_type_is_an_error_naming_key_and_file() {
-        for text in [
-            "max = \"fifteen\"",
-            "threshold = -1",
-            "logical = 1",
-            "[rust]\ntests = \"no\"",
-        ] {
+        let cases = [
+            ("max = \"fifteen\"", "max"),
+            ("threshold = -1", "threshold"),
+            ("logical = 1", "logical"),
+            ("[rust]\ntests = \"no\"", "tests"),
+        ];
+        for (text, key) in cases {
             let err = parse(text).unwrap_err();
             assert!(err.to_string().contains("cmplx.toml"), "{text}: {err}");
-            let key = text
-                .split([' ', '='])
-                .find(|s| !s.is_empty() && !s.starts_with('['))
-                .unwrap();
-            let key = if text.contains("tests") { "tests" } else { key };
             assert!(err.message.contains(key), "{text}: {}", err.message);
         }
     }
