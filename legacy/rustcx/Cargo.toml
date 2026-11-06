@@ -1,5 +1,5 @@
 [package]
-name = "rustcx"
+name = "rustcx-legacy"
 version = "0.1.0"
 edition = "2021"
 description = "Cyclomatic complexity for Rust functions"
@@ -10,7 +10,7 @@ name = "rustcx"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustcx"
+name = "rustcx-legacy"
 path = "src/main.rs"
 
 [dependencies]

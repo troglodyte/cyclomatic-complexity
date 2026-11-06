@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn rustcx(args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rustcx"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
         .args(args)
         .output()
         .expect("binary should run");
@@ -26,7 +26,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 /// Run the binary with `dir` as the working directory, which is where config
 /// discovery starts.
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rustcx"))
+    Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -98,7 +98,7 @@ fn an_unparseable_file_warns_and_exits_two_without_stopping() {
 fn stdin_is_read_with_a_dash() {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rustcx"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

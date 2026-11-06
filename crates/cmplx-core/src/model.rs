@@ -1,7 +1,5 @@
 //! Language-agnostic result types shared by every language crate.
 
-use serde::Serialize;
-
 /// The kind of a function-like item. `id` is the stable JSON value;
 /// `label` is the human-facing text for tables and the LSP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,7 +9,7 @@ pub struct Kind {
 }
 
 /// A single branch point that contributed to a function's complexity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
     pub line: u32,
     pub branch: &'static str,

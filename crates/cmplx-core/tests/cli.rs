@@ -266,6 +266,15 @@ fn ext_is_normalised_and_accepted_with_or_without_stdin() {
 }
 
 #[test]
+fn an_empty_ext_is_an_argument_error() {
+    for value in ["", ".", ".."] {
+        let err = parse_args("jscx", &args(&["--ext", value, "-"]), &js_alias()).unwrap_err();
+        assert!(err.contains("--ext"), "{value:?}: {err}");
+    }
+    assert!(parse_args("jscx", &args(&["--ext=", "-"]), &js_alias()).is_err());
+}
+
+#[test]
 fn value_flags_accept_equals_form() {
     assert_eq!(cmplx(&["--min=3", "x"]).min, 3);
     assert_eq!(cmplx(&["--top=2", "x"]).top, Some(2));

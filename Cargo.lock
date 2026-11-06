@@ -3,10 +3,19 @@
 version = 4
 
 [[package]]
+name = "cmplx"
+version = "0.1.0"
+dependencies = [
+ "cmplx-core",
+ "cmplx-js",
+ "cmplx-rust",
+]
+
+[[package]]
 name = "cmplx-core"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "colored",
  "serde_json",
  "toml",
 ]
@@ -70,6 +79,14 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jscx"
 version = "0.1.0"
 dependencies = [
+ "cmplx-core",
+ "cmplx-js",
+]
+
+[[package]]
+name = "jscx-legacy"
+version = "0.1.0"
+dependencies = [
  "cmplx-js",
  "colored",
  "serde",
@@ -108,6 +125,14 @@ dependencies = [
 
 [[package]]
 name = "rustcx"
+version = "0.1.0"
+dependencies = [
+ "cmplx-core",
+ "cmplx-rust",
+]
+
+[[package]]
+name = "rustcx-legacy"
 version = "0.1.0"
 dependencies = [
  "cmplx-rust",

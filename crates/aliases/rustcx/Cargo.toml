@@ -1,0 +1,10 @@
+[package]
+name = "rustcx"
+version = "0.1.0"
+edition = "2021"
+description = "Cyclomatic complexity for Rust: cmplx with --rust"
+license = "MIT"
+
+[dependencies]
+cmplx-core = { path = "../../cmplx-core" }
+cmplx-rust = { path = "../../cmplx-rust" }

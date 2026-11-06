@@ -5,10 +5,10 @@ set -euo pipefail
 
 export NO_COLOR=1 CLICOLOR=0
 
-cargo build --release -p jscx -p rustcx
+cargo build --release -p jscx-legacy -p rustcx-legacy
 
-JSCX="$PWD/target/release/jscx"
-RUSTCX="$PWD/target/release/rustcx"
+JSCX="$PWD/target/release/jscx-legacy"
+RUSTCX="$PWD/target/release/rustcx-legacy"
 GOLDEN_DIR="tests/golden"
 
 rm -rf "$GOLDEN_DIR/jscx" "$GOLDEN_DIR/rustcx"

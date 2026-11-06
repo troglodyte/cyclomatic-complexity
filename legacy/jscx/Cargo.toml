@@ -1,5 +1,5 @@
 [package]
-name = "jscx"
+name = "jscx-legacy"
 version = "0.1.0"
 edition = "2021"
 description = "Cyclomatic complexity for JavaScript and TypeScript functions"
@@ -10,7 +10,7 @@ name = "jscx"
 path = "src/lib.rs"
 
 [[bin]]
-name = "jscx"
+name = "jscx-legacy"
 path = "src/main.rs"
 
 [dependencies]

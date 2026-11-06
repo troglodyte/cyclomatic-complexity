@@ -15,7 +15,7 @@ struct Server {
 
 impl Server {
     fn start() -> Server {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rustcx"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
             .arg("--lsp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

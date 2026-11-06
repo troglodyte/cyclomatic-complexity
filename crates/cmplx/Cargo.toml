@@ -1,0 +1,11 @@
+[package]
+name = "cmplx"
+version = "0.1.0"
+edition = "2021"
+description = "Cyclomatic complexity for every supported language"
+license = "MIT"
+
+[dependencies]
+cmplx-core = { path = "../cmplx-core" }
+cmplx-js = { path = "../cmplx-js" }
+cmplx-rust = { path = "../cmplx-rust" }

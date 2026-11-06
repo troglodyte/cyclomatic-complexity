@@ -138,7 +138,11 @@ impl Parser<'_> {
             }
             ValueFlag::Top => self.cli.top = Some(number(flag, raw)? as usize),
             ValueFlag::Ext => {
-                self.cli.ext = Some(raw.trim_start_matches('.').to_ascii_lowercase());
+                let ext = raw.trim_start_matches('.');
+                if ext.is_empty() {
+                    return Err(format!("{flag} needs an extension, got: {raw:?}"));
+                }
+                self.cli.ext = Some(ext.to_ascii_lowercase());
             }
         }
         Ok(())
