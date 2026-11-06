@@ -9,3 +9,6 @@ license = "MIT"
 cmplx-core = { path = "../cmplx-core" }
 cmplx-js = { path = "../cmplx-js" }
 cmplx-rust = { path = "../cmplx-rust" }
+
+[dev-dependencies]
+serde_json = "1.0"

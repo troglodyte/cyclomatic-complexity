@@ -9,6 +9,7 @@ dependencies = [
  "cmplx-core",
  "cmplx-js",
  "cmplx-rust",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,7 +1,18 @@
+mod common;
+
+use common::{bin, workspace_root};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where the rustcx fixtures live; the relative `fixtures/...` paths below
+/// resolve from here, as they did when this suite sat beside the tool.
+fn rustcx_home() -> PathBuf {
+    workspace_root().join("legacy/rustcx")
+}
+
 fn rustcx(args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
+    let out = Command::new(bin("rustcx"))
+        .current_dir(rustcx_home())
         .args(args)
         .output()
         .expect("binary should run");
@@ -14,7 +25,7 @@ fn rustcx(args: &[&str]) -> (String, String, i32) {
 
 /// A unique empty directory under the system temp dir, so tests that write a
 /// `rustcx.toml` cannot see each other's.
-fn temp_dir(tag: &str) -> std::path::PathBuf {
+fn temp_dir(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
@@ -25,8 +36,8 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 
 /// Run the binary with `dir` as the working directory, which is where config
 /// discovery starts.
-fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
+fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(bin("rustcx"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -98,7 +109,7 @@ fn an_unparseable_file_warns_and_exits_two_without_stopping() {
 fn stdin_is_read_with_a_dash() {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rustcx-legacy"))
+    let mut child = Command::new(bin("rustcx"))
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -271,4 +282,71 @@ fn a_broken_config_file_is_reported() {
     assert_eq!(out.status.code(), Some(2), "a typo'd key is loud, not silent");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("rustcx.toml"), "got: {err}");
+}
+
+/// Run `cmplx` (both languages) with `dir` as the working directory.
+fn cmplx_in(dir: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(bin("cmplx"))
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .args(args)
+        .output()
+        .expect("run cmplx");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+const TS_SOURCE: &str = "export function pick(a: boolean) { return a ? 1 : 2; }\n";
+const RUST_SOURCE: &str = "fn gate(a: bool) { if a {} }\n";
+
+#[test]
+fn cmplx_scores_js_and_rust_in_one_walk() {
+    let dir = temp_dir("mixed");
+    std::fs::write(dir.join("a.ts"), TS_SOURCE).unwrap();
+    std::fs::write(dir.join("b.rs"), RUST_SOURCE).unwrap();
+
+    let (stdout, stderr, code) = cmplx_in(&dir, &["."]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(stdout.contains("pick"), "the TypeScript row:\n{stdout}");
+    assert!(stdout.contains("gate"), "the Rust row:\n{stdout}");
+    assert!(stdout.contains("2 files"), "the summary:\n{stdout}");
+}
+
+#[test]
+fn a_parse_failure_in_one_language_does_not_stop_the_others() {
+    let dir = temp_dir("mixed-bad");
+    std::fs::write(dir.join("a.ts"), TS_SOURCE).unwrap();
+    std::fs::write(dir.join("bad.rs"), "fn f( {").unwrap();
+
+    let (stdout, stderr, code) = cmplx_in(&dir, &["."]);
+    assert_eq!(code, 2, "a parse failure is exit 2");
+    assert!(stdout.contains("pick"), "a.ts is still scored:\n{stdout}");
+    assert!(
+        stderr.contains("bad.rs") && stderr.contains("parse error"),
+        "the warning names the file:\n{stderr}"
+    );
+}
+
+#[test]
+fn an_unclaimed_explicit_file_exits_two() {
+    let dir = temp_dir("unclaimed");
+    std::fs::write(dir.join("README.md"), "# hi\n").unwrap();
+
+    let (_, stderr, code) = cmplx_in(&dir, &["README.md"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("no language for README.md"), "got: {stderr}");
+}
+
+#[test]
+fn rustcx_scores_an_explicit_file_regardless_of_extension() {
+    let dir = temp_dir("snippet");
+    std::fs::write(dir.join("snippet.txt"), RUST_SOURCE).unwrap();
+
+    let out = run_in(&dir, &["snippet.txt"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("gate"), "got:\n{stdout}");
 }
