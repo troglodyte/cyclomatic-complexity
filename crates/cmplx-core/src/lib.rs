@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod config;
 pub mod language;
+pub mod lsp;
 pub mod model;
 pub mod report;
 pub mod run;

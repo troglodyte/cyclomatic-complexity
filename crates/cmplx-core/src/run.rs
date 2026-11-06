@@ -29,7 +29,7 @@ pub fn run(program: &'static str, reg: Registry) -> ExitCode {
         }
     };
     if cli.lsp {
-        return serve_lsp(program);
+        return serve_lsp(program, &reg);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match resolve(&cli, &cwd, &reg) {
@@ -58,10 +58,16 @@ pub fn run_as(lang: Lang) -> ExitCode {
     run(program, Registry::alias(lang))
 }
 
-/// Placeholder until the language server moves into the core.
-fn serve_lsp(program: &str) -> ExitCode {
-    eprintln!("{program}: --lsp is not implemented yet");
-    ExitCode::from(2)
+/// Serve the language server on stdio. Only a broken stdio ends it early;
+/// that is reported on stderr, since stdout is the protocol.
+fn serve_lsp(program: &'static str, reg: &Registry) -> ExitCode {
+    match crate::lsp::serve(program, reg) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{program}: --lsp: {e}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Layer a config file under the flags. Pure, so it is testable without a
