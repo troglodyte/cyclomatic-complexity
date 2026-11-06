@@ -20,7 +20,7 @@ pub struct Cli {
     /// `--ext`: lower-cased, without a leading dot.
     pub ext: Option<String>,
     pub min: u32,
-    /// `--max`. Also recorded in `flags.max` so that `flags.or(file)` resolves
+    /// `--max`; mirrors `flags.max`. Also recorded in `flags.max` so that `flags.or(file)` resolves
     /// it exactly as rustcx merged its CLI layer over `rustcx.toml`.
     pub max: Option<u32>,
     pub top: Option<usize>,
@@ -174,12 +174,12 @@ impl Parser<'_> {
             reg.langs().iter().filter(chosen).copied().collect()
         };
         self.apply_option_flags()?;
-        let cli = self.cli;
+        let mut cli = self.cli;
         if cli.stdin {
             check_stdin_language(&cli, reg)?;
         }
         if cli.paths.is_empty() && !cli.stdin && !cli.lsp {
-            return Err("no paths given".to_string());
+            cli.paths.push(PathBuf::from("."));
         }
         Ok(cli)
     }

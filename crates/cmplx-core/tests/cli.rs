@@ -324,10 +324,6 @@ fn help_and_version_return_none() {
 
 #[test]
 fn errors_are_reported_not_panicked() {
-    assert!(
-        parse_args("cmplx", &args(&[]), &every()).is_err(),
-        "no paths"
-    );
     assert!(parse_args("cmplx", &args(&["-x", "a"]), &every()).is_err());
     assert!(parse_args("cmplx", &args(&["-m", "x.rs"]), &every()).is_err());
     assert!(parse_args("cmplx", &args(&["-m"]), &every()).is_err());
@@ -349,4 +345,16 @@ fn an_alias_help_names_the_alias_and_offers_no_language_flags() {
     let text = help("jscx", &js_alias());
     assert!(text.contains("jscx [OPTIONS]"));
     assert!(!text.contains("--js "));
+}
+
+#[test]
+fn no_paths_defaults_to_the_current_directory() {
+    assert_eq!(cmplx(&[]).paths, vec![PathBuf::from(".")]);
+    assert_eq!(jscx(&["--min", "2"]).paths, vec![PathBuf::from(".")]);
+}
+
+#[test]
+fn stdin_and_lsp_do_not_get_a_default_path() {
+    assert!(cmplx(&["--js", "-"]).paths.is_empty());
+    assert!(cmplx(&["--lsp"]).paths.is_empty());
 }
