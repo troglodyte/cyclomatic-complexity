@@ -1,5 +1,6 @@
 //! `cargo install --path crates/aliases/jscx` must compile no C and no `syn`:
-//! the JS alias's normal dependency tree may not reach a parser crate.
+//! the JS alias's normal and build dependency tree may not reach a parser
+//! crate or a C compiler crate.
 
 use std::path::Path;
 use std::process::Command;
@@ -26,7 +27,7 @@ fn the_js_alias_has_no_parser_or_c_dependencies() {
             "-p",
             "jscx",
             "-e",
-            "normal",
+            "normal,build",
             "--prefix",
             "none",
             "--manifest-path",

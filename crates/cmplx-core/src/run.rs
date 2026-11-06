@@ -99,11 +99,12 @@ fn execute<R: Read, W: Write, E: Write>(
     let mut rows: Vec<Row> = Vec::new();
     let mut ok = true;
     if cli.stdin {
-        let mut src = String::new();
-        if let Err(e) = stdin.read_to_string(&mut src) {
+        let mut bytes = Vec::new();
+        if let Err(e) = stdin.read_to_end(&mut bytes) {
             warn(format!("{STDIN_NAME}: {e}"));
             return 2;
         }
+        let src = String::from_utf8_lossy(&bytes);
         ok &= score_stdin(&mut rows, cli, config, &src, &mut warn);
     }
     ok &= score_files(&mut rows, cli, reg, config, &mut warn);
@@ -351,6 +352,10 @@ mod tests {
     }
 
     fn execute_with(reg: &Registry, list: &[&str], stdin: &str) -> Outcome {
+        execute_bytes(reg, list, stdin.as_bytes())
+    }
+
+    fn execute_bytes(reg: &Registry, list: &[&str], mut stdin: &[u8]) -> Outcome {
         colored::control::set_override(false);
         let cli = parse(reg, list);
         let config = apply(&cli, FileConfig::default());
@@ -359,7 +364,7 @@ mod tests {
             &cli,
             reg,
             &config,
-            &mut stdin.as_bytes(),
+            &mut stdin,
             &mut out,
             &mut err,
         );
@@ -520,6 +525,14 @@ mod tests {
         assert_eq!(v["functions"][0]["file"], "<stdin>");
         assert_eq!(v["functions"][0]["language"], "js");
         assert_eq!(v["functions"][0]["name"], "ext:js");
+    }
+
+    #[test]
+    fn stdin_that_is_not_utf8_is_read_lossily_like_a_file() {
+        let out = execute_bytes(&both(), &["--js", "-"], b"caf\xff 2\ng 1\n");
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert!(out.stdout.contains("caf\u{fffd}"), "got:\n{}", out.stdout);
+        assert!(out.stdout.contains("2 functions"), "got:\n{}", out.stdout);
     }
 
     #[test]
