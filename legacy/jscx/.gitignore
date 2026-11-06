@@ -1,0 +1,40 @@
+# Rust
+target/
+Cargo.lock
+
+# Gradle — JetBrains plugin
+.gradle/
+.kotlin/
+local.properties
+# The IntelliJ Platform Gradle Plugin's working directory: downloaded IDE
+# artifacts, product releases, and the runIde sandbox. Hundreds of megabytes.
+.intellijPlatform/
+# The Gradle wrapper is deliberately NOT ignored — gradlew, gradlew.bat and
+# gradle/wrapper/ (including the jar) pin the Gradle version the build needs.
+# Many boilerplate .gitignore files exclude gradle-wrapper.jar; do not add it.
+
+# Zed extension — compiled by Zed on every install/rebuild
+extensions/*/extension.wasm
+extensions/*/grammars/
+
+# Scripts handed over to run by hand
+/run/
+/scripts-history/
+
+# JetBrains IDE project files
+.idea/
+*.iml
+out/
+
+# Node / JS / TS
+node_modules/
+dist/
+
+# Build output — Gradle, JS bundlers, anything else
+build/
+
+# Logs, env, OS cruft
+*.log
+.env
+.DS_Store
+docs/superpowers
