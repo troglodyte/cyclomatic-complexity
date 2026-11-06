@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["legacy/rustcx", "legacy/jscx"]
+members = ["legacy/rustcx", "legacy/jscx", "crates/cmplx-core"]
 
 [profile.release]
 opt-level = 3

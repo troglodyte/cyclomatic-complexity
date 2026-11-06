@@ -1,0 +1,9 @@
+[package]
+name = "cmplx-core"
+version = "0.1.0"
+edition = "2021"
+description = "Language-agnostic cyclomatic complexity model and Language trait"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
