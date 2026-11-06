@@ -1,0 +1,18 @@
+legacy/rustcx/fixtures/nesting.rs
+    CC   Line  Kind         Name
+     3      8  method       Engine::allows
+
+legacy/rustcx/fixtures/patterns.rs
+    CC   Line  Kind         Name
+     8     16  fn           describe
+     4     27  fn           unwrap_pair
+
+legacy/rustcx/fixtures/simple.rs
+    CC   Line  Kind         Name
+     5      9  fn           branchy
+
+legacy/rustcx/fixtures/syntax.rs
+    CC   Line  Kind         Name
+     3     23  fn           ambiguous
+
+5 functions in 4 files · mean 4.6 · worst 8 (describe at legacy/rustcx/fixtures/patterns.rs:16)

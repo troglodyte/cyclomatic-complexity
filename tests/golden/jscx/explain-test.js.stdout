@@ -1,0 +1,57 @@
+==> Running jscx <==
+legacy/jscx/test.js
+    CC   Line  Kind         Name
+     2      9  function     slugify
+          line 10    ?:
+     2     14  function     describeRatio
+          line 16    ?:
+    12     20  function     normalizeConfig
+          line 23    if
+          line 26    if
+          line 26    ||
+          line 29    if
+          line 33    for
+          line 34    if
+          line 37    if
+          line 40    if
+          line 40    &&
+          line 45    ||=
+          line 46    ??=
+    24     52  function     reduceEvents
+          line 57    for
+          line 58    if
+          line 58    ||
+          line 63    case
+          line 66    case
+          line 69    case
+          line 72    case
+          line 73    if
+          line 81    if
+          line 81    &&
+          line 82    if
+          line 82    ||
+          line 87    if
+          line 87    &&
+          line 88    for
+          line 89    if
+          line 95    while
+          line 95    &&
+          line 101   if
+          line 104   catch
+          line 105   if
+          line 111   ?:
+          line 112   &&
+     6    116  function     EventList
+          line 117   if
+          line 120   if
+          line 120   ||
+          line 121   ??
+          line 125   ?:
+     3    127  arrow          map(…)
+          line 129   ?:
+          line 130   &&
+     1    130  arrow            <anonymous>
+
+7 functions in 1 file
+	 · mean 7.1
+	 · worst 24 (reduceEvents at legacy/jscx/test.js:52)

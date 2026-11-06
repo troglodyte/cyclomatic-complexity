@@ -1,0 +1,17 @@
+legacy/rustcx/fixtures/patterns.rs
+    CC   Line  Kind         Name
+     8     16  fn           describe
+           18  match arm
+           18  guard
+           18  &&
+           19  match arm
+           20  match arm
+           20  pattern alternative
+           21  match arm
+     4     27  fn           unwrap_pair
+           28  let else
+           31  if let
+           31  pattern alternative
+     1     38  fn           parse
+
+3 functions in 1 file · mean 4.3 · worst 8 (describe at legacy/rustcx/fixtures/patterns.rs:16)

@@ -1,0 +1,11 @@
+==> Running jscx <==
+   CC  Location        Kind         Name
+   25  legacy/jscx/test.ts:71  function applyPricingRules
+   24  legacy/jscx/test.js:52  function reduceEvents
+   23  legacy/jscx/test.ts:140  method route
+   14  legacy/jscx/test.ts:35  function validateOrder
+   12  legacy/jscx/test.js:20  function normalizeConfig
+
+14 functions in 2 files
+	 · mean 8.6
+	 · worst 25 (applyPricingRules at legacy/jscx/test.ts:71)

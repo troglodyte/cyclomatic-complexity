@@ -1,0 +1,17 @@
+legacy/rustcx/fixtures/nesting.rs
+    CC   Line  Kind         Name
+     3      8  method       Engine::allows
+            9  if
+            9  &&
+     2     16  method       Engine::tally
+           18  for
+     2     21  closure        filter
+           21  ||
+     2     28  trait fn     Policy::check
+           29  if
+     2     38  fn           outer
+           46  if
+     2     39  fn             inner
+           40  if
+
+6 functions in 1 file · mean 2.2 · worst 3 (Engine::allows at legacy/rustcx/fixtures/nesting.rs:8)

@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "functions": 7,
+    "files": 1,
+    "mean": 7.143,
+    "limit": null,
+    "overLimit": 0
+  },
+  "functions": [
+    {"file": "legacy/jscx/test.js", "name": "slugify", "kind": "function", "line": 9, "depth": 0, "complexity": 2, "points": [{"line": 10, "branch": "?:"}]},
+    {"file": "legacy/jscx/test.js", "name": "describeRatio", "kind": "function", "line": 14, "depth": 0, "complexity": 2, "points": [{"line": 16, "branch": "?:"}]},
+    {"file": "legacy/jscx/test.js", "name": "normalizeConfig", "kind": "function", "line": 20, "depth": 0, "complexity": 12, "points": [{"line": 23, "branch": "if"}, {"line": 26, "branch": "if"}, {"line": 26, "branch": "||"}, {"line": 29, "branch": "if"}, {"line": 33, "branch": "for"}, {"line": 34, "branch": "if"}, {"line": 37, "branch": "if"}, {"line": 40, "branch": "if"}, {"line": 40, "branch": "&&"}, {"line": 45, "branch": "||="}, {"line": 46, "branch": "??="}]},
+    {"file": "legacy/jscx/test.js", "name": "reduceEvents", "kind": "function", "line": 52, "depth": 0, "complexity": 24, "points": [{"line": 57, "branch": "for"}, {"line": 58, "branch": "if"}, {"line": 58, "branch": "||"}, {"line": 63, "branch": "case"}, {"line": 66, "branch": "case"}, {"line": 69, "branch": "case"}, {"line": 72, "branch": "case"}, {"line": 73, "branch": "if"}, {"line": 81, "branch": "if"}, {"line": 81, "branch": "&&"}, {"line": 82, "branch": "if"}, {"line": 82, "branch": "||"}, {"line": 87, "branch": "if"}, {"line": 87, "branch": "&&"}, {"line": 88, "branch": "for"}, {"line": 89, "branch": "if"}, {"line": 95, "branch": "while"}, {"line": 95, "branch": "&&"}, {"line": 101, "branch": "if"}, {"line": 104, "branch": "catch"}, {"line": 105, "branch": "if"}, {"line": 111, "branch": "?:"}, {"line": 112, "branch": "&&"}]},
+    {"file": "legacy/jscx/test.js", "name": "EventList", "kind": "function", "line": 116, "depth": 0, "complexity": 6, "points": [{"line": 117, "branch": "if"}, {"line": 120, "branch": "if"}, {"line": 120, "branch": "||"}, {"line": 121, "branch": "??"}, {"line": 125, "branch": "?:"}]},
+    {"file": "legacy/jscx/test.js", "name": "map(…)", "kind": "arrow", "line": 127, "depth": 1, "complexity": 3, "points": [{"line": 129, "branch": "?:"}, {"line": 130, "branch": "&&"}]},
+    {"file": "legacy/jscx/test.js", "name": "<anonymous>", "kind": "arrow", "line": 130, "depth": 2, "complexity": 1, "points": []}
+  ]
+}

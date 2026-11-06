@@ -1,0 +1,30 @@
+legacy/rustcx/fixtures/nesting.rs
+    CC   Line  Kind         Name
+     3      8  method       Engine::allows
+     2     16  method       Engine::tally
+     2     21  closure        filter
+     2     28  trait fn     Policy::check
+     2     38  fn           outer
+     2     39  fn             inner
+
+legacy/rustcx/fixtures/patterns.rs
+    CC   Line  Kind         Name
+     8     16  fn           describe
+     4     27  fn           unwrap_pair
+     1     38  fn           parse
+
+legacy/rustcx/fixtures/simple.rs
+    CC   Line  Kind         Name
+     1      5  fn           plain
+     5      9  fn           branchy
+     1     21  fn           add_one
+     1     22  closure        map
+
+legacy/rustcx/fixtures/syntax.rs
+    CC   Line  Kind         Name
+     2     12  method       Holder::shout
+     3     23  fn           ambiguous
+     1     33  fn           r#match
+     1     49  fn           uses_macro
+
+17 functions in 4 files · mean 2.4 · worst 8 (describe at legacy/rustcx/fixtures/patterns.rs:16)
