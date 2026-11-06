@@ -1,3 +1,2 @@
-pub mod lexer;
-pub mod analyze;
+pub use cmplx_js::{analyze, lexer};
 pub mod lsp;
