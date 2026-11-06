@@ -34,6 +34,15 @@ pub struct ConfigError {
     pub message: String,
 }
 
+impl ConfigError {
+    fn new(path: &Path, message: impl Into<String>) -> ConfigError {
+        ConfigError {
+            path: path.to_path_buf(),
+            message: message.into(),
+        }
+    }
+}
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.path.display(), self.message)
@@ -63,10 +72,8 @@ fn to_u32(value: &toml::Value) -> Option<u32> {
 }
 
 fn parse_table(path: &Path, text: &str) -> Result<toml::Table, ConfigError> {
-    text.parse().map_err(|e: toml::de::Error| ConfigError {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })
+    text.parse()
+        .map_err(|e: toml::de::Error| ConfigError::new(path, e.to_string()))
 }
 
 impl FileConfig {
@@ -81,6 +88,7 @@ impl FileConfig {
         *slot = Some(n);
         Ok(true)
     }
+
     fn set(&mut self, lang: Lang, key: &'static str, value: bool) {
         self.langs.entry(lang.id()).or_default().set(key, value);
     }
@@ -90,16 +98,15 @@ impl FileConfig {
     /// to a language that is not linked. A key inside a linked language's own
     /// table that it does not declare is always an error.
     pub fn parse(path: &Path, text: &str, reg: &Registry) -> Result<FileConfig, ConfigError> {
-        let fail = |message: String| ConfigError {
-            path: path.to_path_buf(),
-            message,
-        };
+        let fail = |message: String| ConfigError::new(path, message);
         let table = parse_table(path, text)?;
         let mut cfg = FileConfig::default();
         // Top-level keys first, so language tables override them whatever the file order.
         for (key, value) in &table {
+            if cfg.set_limit(key, value).map_err(&fail)? {
+                continue;
+            }
             match key.as_str() {
-                _ if cfg.set_limit(key, value).map_err(&fail)? => {}
                 _ if reg.by_id(key).is_some() && value.is_table() => {}
                 _ => {
                     let owners: Vec<_> = declaring_langs(reg.langs(), key).collect();
@@ -146,36 +153,29 @@ impl FileConfig {
         text: &str,
         reg: &Registry,
     ) -> Result<FileConfig, ConfigError> {
-        let fail = |message: String| ConfigError {
-            path: path.to_path_buf(),
-            message,
-        };
+        let fail = |message: String| ConfigError::new(path, message);
         let table = parse_table(path, text)?;
         let rust = reg.by_id(LEGACY_RUST_FILE.1);
         let mut cfg = FileConfig::default();
         for (key, value) in &table {
-            match key.as_str() {
-                _ if cfg.set_limit(key, value).map_err(&fail)? => {}
-                _ => {
-                    let (lang, k) = rust
-                        .and_then(|lang| declared_key(lang, key).map(|k| (lang, k)))
-                        .ok_or_else(|| fail(format!("unknown key `{key}`")))?;
-                    let flag = value
-                        .as_bool()
-                        .ok_or_else(|| fail(format!("`{key}` must be a boolean")))?;
-                    cfg.set(lang, k, flag);
-                }
+            if cfg.set_limit(key, value).map_err(&fail)? {
+                continue;
             }
+            let (lang, k) = rust
+                .and_then(|lang| declared_key(lang, key).map(|k| (lang, k)))
+                .ok_or_else(|| fail(format!("unknown key `{key}`")))?;
+            let flag = value
+                .as_bool()
+                .ok_or_else(|| fail(format!("`{key}` must be a boolean")))?;
+            cfg.set(lang, k, flag);
         }
         Ok(cfg)
     }
 
     /// Read and parse one file; `rustcx.toml` is read with the legacy mapping.
     fn load(path: &Path, reg: &Registry) -> Result<FileConfig, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|e| ConfigError {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::new(path, e.to_string()))?;
         if path
             .file_name()
             .is_some_and(|name| name == LEGACY_RUST_FILE.0)
