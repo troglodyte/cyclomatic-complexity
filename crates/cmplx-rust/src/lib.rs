@@ -90,7 +90,12 @@ impl Language for Rust {
             question: opts.flag(&QUESTION).unwrap_or(false),
             tests: opts.flag(&TESTS).unwrap_or(true),
         };
-        analyze::analyze(src, options)
+        let result = analyze::analyze(src, options);
+        // Every span is already a line number, so the thread-local span table
+        // (which otherwise keeps each parsed file's text alive) can be dropped.
+        // Callers of `Language::analyze` cannot reach proc-macro2 themselves.
+        proc_macro2::extra::invalidate_current_thread_spans();
+        result
             .map(|funcs| funcs.into_iter().map(core_func).collect())
             .map_err(|e| ParseError { line: e.line, message: e.message })
     }
@@ -126,5 +131,30 @@ mod tests {
     fn a_parse_error_carries_its_line() {
         let err = analyze_with("fn f( {", &LangOptions::default()).unwrap_err();
         assert_eq!(err.line, 1);
+    }
+
+    #[test]
+    fn logical_false_drops_the_and_operator_point() {
+        let src = "fn f(a: bool, b: bool) { if a && b {} }";
+        let mut off = LangOptions::default();
+        off.set("logical", false);
+        let default_score = analyze_with(src, &LangOptions::default()).unwrap()[0].complexity;
+        let off_score = analyze_with(src, &off).unwrap()[0].complexity;
+        assert_eq!((default_score, off_score), (3, 2));
+    }
+
+    // proc-macro2's span table is private, so invalidation cannot be observed
+    // directly. This guards what it must not break: repeated analyses on one
+    // thread (the LSP case) stay correct, including a later direct `analyze`.
+    #[test]
+    fn repeated_analyses_on_one_thread_stay_correct() {
+        let src = "\n\nfn first() {}\nfn second() { if true {} }";
+        let baseline = analyze_with(src, &LangOptions::default()).unwrap();
+        for _ in 0..5 {
+            assert_eq!(analyze_with(src, &LangOptions::default()).unwrap(), baseline);
+        }
+        let direct = analyze::analyze(src, analyze::Options::default()).unwrap();
+        assert_eq!(direct[0].line, 3);
+        assert_eq!(baseline[0].line, 3);
     }
 }

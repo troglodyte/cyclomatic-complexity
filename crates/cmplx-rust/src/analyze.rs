@@ -77,7 +77,7 @@ pub struct ParseError {
 ///
 /// All spans are resolved to line numbers before this returns, so the caller is
 /// free to call `proc_macro2::extra::invalidate_current_thread_spans()`
-/// afterwards. See the Global Constraints in the plan.
+/// afterwards. The `Language` wrapper in `lib.rs` owns that call.
 pub fn analyze(src: &str, opts: Options) -> Result<Vec<Func>, ParseError> {
     let file = syn::parse_file(src).map_err(|e| ParseError {
         line: e.span().start().line as u32,
