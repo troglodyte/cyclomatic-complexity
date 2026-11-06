@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Describes one boolean option a language exposes (config key, CLI flags, LSP key).
+#[derive(Clone, Copy, Debug)]
 pub struct OptionSpec {
     /// `cmplx.toml` key and `initializationOptions` key, e.g. `"optional-chain"`.
     pub key: &'static str,
@@ -60,6 +61,7 @@ pub trait Language: Sync {
 
 pub type Lang = &'static dyn Language;
 
+#[derive(Clone)]
 pub struct Registry {
     langs: Vec<Lang>,
     complete: bool,
