@@ -1,4 +1,4 @@
-use rustcx::analyze::{analyze, Options};
+use cmplx_rust::analyze::{analyze, Options};
 use std::collections::BTreeMap;
 
 fn score_file(path: &str, opts: Options) -> BTreeMap<String, u32> {

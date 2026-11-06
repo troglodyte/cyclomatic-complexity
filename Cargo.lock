@@ -10,6 +10,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmplx-rust"
+version = "0.1.0"
+dependencies = [
+ "cmplx-core",
+ "proc-macro2",
+ "serde",
+ "syn",
+]
+
+[[package]]
 name = "colored"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,11 +100,11 @@ dependencies = [
 name = "rustcx"
 version = "0.1.0"
 dependencies = [
+ "cmplx-rust",
  "colored",
  "proc-macro2",
  "serde",
  "serde_json",
- "syn",
  "toml",
 ]
 
