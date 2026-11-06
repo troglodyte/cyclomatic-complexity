@@ -1,6 +1,9 @@
 # Rust
-target/
-Cargo.lock
+/target
+**/extensions/*/target/
+
+# Controller working files
+.superpowers/
 
 # Gradle — JetBrains plugin
 .gradle/
@@ -14,8 +17,8 @@ local.properties
 # Many boilerplate .gitignore files exclude gradle-wrapper.jar; do not add it.
 
 # Zed extension — compiled by Zed on every install/rebuild
-extensions/*/extension.wasm
-extensions/*/grammars/
+**/extensions/*/extension.wasm
+**/extensions/*/grammars/
 
 # Scripts handed over to run by hand
 /run/
@@ -29,6 +32,7 @@ out/
 # Node / JS / TS
 node_modules/
 dist/
+*.vsix
 
 # Build output — Gradle, JS bundlers, anything else
 build/
@@ -37,4 +41,3 @@ build/
 *.log
 .env
 .DS_Store
-docs/superpowers
