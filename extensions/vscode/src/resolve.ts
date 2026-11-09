@@ -29,19 +29,6 @@ export function realEnv(): ResolveEnv {
 }
 
 /**
- * Locate the `cmplx` executable: the configured path, then `PATH`, then Cargo's
- * bin directory.
- *
- * The Cargo fallback is not redundant. A VS Code launched from the Dock or the
- * Start menu does not inherit the shell's `PATH`, so `~/.cargo/bin` is routinely
- * invisible to the second step even though the binary is installed and works
- * fine in a terminal.
- *
- * A configured path that is not executable resolves to `undefined` rather than
- * silently falling through, so a typo surfaces as an error instead of as
- * mysteriously different behavior.
- */
-/**
  * Path joining and `PATH` splitting driven by [ResolveEnv.windows] rather than by
  * `node:path`, whose `join` and `delimiter` are fixed to the *running* platform.
  * Going through the injected flag is what makes the Windows branch testable from
@@ -56,6 +43,19 @@ function child(windows: boolean, dir: string, ...rest: string[]): string {
   );
 }
 
+/**
+ * Locate the `cmplx` executable: the configured path, then `PATH`, then Cargo's
+ * bin directory.
+ *
+ * The Cargo fallback is not redundant. A VS Code launched from the Dock or the
+ * Start menu does not inherit the shell's `PATH`, so `~/.cargo/bin` is routinely
+ * invisible to the second step even though the binary is installed and works
+ * fine in a terminal.
+ *
+ * A configured path that is not executable resolves to `undefined` rather than
+ * silently falling through, so a typo surfaces as an error instead of as
+ * mysteriously different behavior.
+ */
 export function resolveBinary(configured: string, env: ResolveEnv): string | undefined {
   const name = env.windows ? "cmplx.exe" : "cmplx";
 
