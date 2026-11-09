@@ -212,4 +212,38 @@ mod tests {
         let off = analyze_as(src, "a.js", &opts_with("logical", false));
         assert_eq!((default[0].complexity, off[0].complexity), (2, 1));
     }
+
+    /// Analyze `src` on a thread with Rust's default 2 MB spawned-thread stack.
+    fn analyze_on_small_stack(src: String) -> Vec<Func> {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || analyze_as(&src, "a.js", &LangOptions::default()))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    // The lexer tracks nesting in a `Vec` of frames and the analyzer matches
+    // brackets with a `Vec` stack; neither recurses, so depth needs no cap.
+    #[test]
+    fn nesting_100k_parens_deep_does_not_overflow_a_2mb_stack() {
+        let src = format!("function f() {{ x = {}1{}; }}", "(".repeat(100_000), ")".repeat(100_000));
+        let funcs = analyze_on_small_stack(src);
+        assert_eq!(funcs.len(), 1);
+    }
+
+    #[test]
+    fn nesting_100k_braces_deep_does_not_overflow_a_2mb_stack() {
+        let src = format!("function f() {}{} if (a) {{}} {}{}", "{", "{".repeat(100_000), "}".repeat(100_000), "}");
+        let funcs = analyze_on_small_stack(src);
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].complexity, 2);
+    }
+
+    #[test]
+    fn nesting_100k_template_literals_deep_does_not_overflow_a_2mb_stack() {
+        let src = format!("function f() {{ x = {}1{}; }}", "`${".repeat(100_000), "}`".repeat(100_000));
+        let funcs = analyze_on_small_stack(src);
+        assert_eq!(funcs.len(), 1);
+    }
 }
