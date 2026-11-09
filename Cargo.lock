@@ -85,16 +85,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jscx-legacy"
-version = "0.1.0"
-dependencies = [
- "cmplx-js",
- "colored",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -130,18 +120,6 @@ version = "0.1.0"
 dependencies = [
  "cmplx-core",
  "cmplx-rust",
-]
-
-[[package]]
-name = "rustcx-legacy"
-version = "0.1.0"
-dependencies = [
- "cmplx-rust",
- "colored",
- "proc-macro2",
- "serde",
- "serde_json",
- "toml",
 ]
 
 [[package]]
