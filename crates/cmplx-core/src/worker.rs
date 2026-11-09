@@ -10,8 +10,8 @@
 //!   `{"id": n, "error": {"kind": "syntax" | "too_deep" | "invalid", "line": n, "limit": n, "message": "..."}}`
 //!
 //! `invalid` is a request the worker refused (not JSON, an unknown language,
-//! text over [`MAX_FILE_BYTES`]); its `id` is `null` when the request had none
-//! that could be read.
+//! text over [`MAX_TEXT_BYTES`]); its `id` is `null` when the request had none
+//! that could be read. A refusal fails that source only; the worker serves on.
 //!
 //! **stdout is the protocol.** Nothing in worker mode may print to it except
 //! through [`serve`].
@@ -34,8 +34,15 @@ const MAX_ESCAPE_GROWTH: u64 = 6;
 /// Room for everything in a request line besides its escaped text.
 const REQUEST_OVERHEAD_BYTES: u64 = 64 * 1024;
 
+/// Longest decoded text scored. Sources are capped at [`MAX_FILE_BYTES`] as
+/// read, then decoded lossily, and each invalid byte becomes U+FFFD, three
+/// bytes; so a source under the cap can decode to up to three times it.
+pub const MAX_TEXT_BYTES: u64 = MAX_FILE_BYTES * 3;
+
 /// Longest request line read. A source of [`MAX_FILE_BYTES`] fits however it
-/// escapes; anything longer is refused without being read into memory.
+/// escapes: a valid byte escapes to at most six (`\u0001`), and an invalid
+/// one is sent as U+FFFD, three bytes, unescaped. Anything longer is refused
+/// without being read into memory.
 pub(crate) const MAX_REQUEST_BYTES: u64 =
     MAX_FILE_BYTES * MAX_ESCAPE_GROWTH + REQUEST_OVERHEAD_BYTES;
 
@@ -103,10 +110,20 @@ pub fn encode_request(request: &Request) -> String {
 /// request line. A line over [`MAX_REQUEST_BYTES`] is refused and ends the
 /// loop, since the rest of it cannot be told from the next request.
 pub fn serve(reg: &Registry, input: &mut impl BufRead, out: &mut impl Write) -> io::Result<()> {
+    serve_with_cap(reg, input, out, MAX_TEXT_BYTES)
+}
+
+/// [`serve`], refusing texts over `max_text` bytes rather than [`MAX_TEXT_BYTES`].
+fn serve_with_cap(
+    reg: &Registry,
+    input: &mut impl BufRead,
+    out: &mut impl Write,
+    max_text: u64,
+) -> io::Result<()> {
     loop {
         let response = match read_line_capped(input, MAX_REQUEST_BYTES)? {
             Line::Eof => return Ok(()),
-            Line::Text(line) => respond(reg, &line),
+            Line::Text(line) => respond(reg, &line, max_text),
             Line::TooLong => {
                 let message = format!("request longer than {} bytes", MAX_REQUEST_BYTES);
                 return write_line(out, &invalid(Value::Null, &message));
@@ -122,12 +139,12 @@ fn write_line(out: &mut impl Write, response: &Value) -> io::Result<()> {
 }
 
 /// The response to one request line.
-fn respond(reg: &Registry, line: &[u8]) -> Value {
+fn respond(reg: &Registry, line: &[u8], max_text: u64) -> Value {
     let request: Value = match serde_json::from_slice(line) {
         Ok(request) => request,
         Err(e) => return invalid(Value::Null, &format!("request is not JSON: {e}")),
     };
-    let (id, lang, path, text, opts) = match parse_request(reg, &request) {
+    let (id, lang, path, text, opts) = match parse_request(reg, &request, max_text) {
         Ok(parsed) => parsed,
         Err(refusal) => return refusal,
     };
@@ -144,6 +161,7 @@ fn respond(reg: &Registry, line: &[u8]) -> Value {
 fn parse_request<'a>(
     reg: &Registry,
     request: &'a Value,
+    max_text: u64,
 ) -> Result<(u64, Lang, &'a str, &'a str, LangOptions), Value> {
     let id = request["id"]
         .as_u64()
@@ -155,10 +173,10 @@ fn parse_request<'a>(
     let (Some(path), Some(text)) = (request["path"].as_str(), request["text"].as_str()) else {
         return Err(invalid(json!(id), "request has no text or path"));
     };
-    if text.len() as u64 > MAX_FILE_BYTES {
+    if text.len() as u64 > max_text {
         return Err(invalid(
             json!(id),
-            &format!("larger than {}", size_label(MAX_FILE_BYTES)),
+            &format!("text larger than {}", size_label(max_text)),
         ));
     }
     let mut opts = LangOptions::default();
@@ -196,8 +214,8 @@ fn error_json(e: &ParseError) -> Value {
         ParseErrorKind::TooDeep { limit } => {
             json!({ "kind": "too_deep", "line": e.line, "limit": limit, "message": e.message })
         }
-        // `analyze_bounded` never returns this; say so rather than guess.
-        ParseErrorKind::Crashed { .. } => {
+        // `analyze_bounded` never returns these; say so rather than guess.
+        ParseErrorKind::Crashed { .. } | ParseErrorKind::Refused => {
             json!({ "kind": "invalid", "line": 0, "message": e.message })
         }
     }
@@ -242,7 +260,15 @@ fn decode_error(error: &Value) -> Result<ParseError, String> {
                 limit: usize::try_from(limit).map_err(|e| e.to_string())?,
             }
         }
-        Some("invalid") => return Err(format!("the worker refused the request: {message}")),
+        // The worker refused this source and is still serving: the source
+        // fails, the worker is fine.
+        Some("invalid") => {
+            return Ok(ParseError {
+                line: 0,
+                message: format!("not scored: {message}"),
+                kind: ParseErrorKind::Refused,
+            })
+        }
         other => return Err(format!("unknown error kind {other:?}")),
     };
     Ok(ParseError {
@@ -505,12 +531,24 @@ mod tests {
     }
 
     #[test]
-    fn text_over_the_file_cap_is_refused() {
-        let text = "x".repeat(MAX_FILE_BYTES as usize + 1);
-        let responses = served(&request(9, &text, &LangOptions::default()));
-        assert_eq!(responses[0]["id"], 9);
-        assert_eq!(responses[0]["error"]["kind"], "invalid");
-        assert_eq!(responses[0]["error"]["message"], "larger than 10 MB");
+    fn decoded_text_is_capped_at_three_times_the_file_cap() {
+        assert_eq!(MAX_TEXT_BYTES, MAX_FILE_BYTES * 3);
+        // A file of invalid bytes decodes to three bytes (U+FFFD) per byte, so
+        // a file at the cap must not be refused once decoded.
+        let at_cap = format!("f 1\n{}", "\u{FFFD}".repeat(4));
+        assert_eq!(at_cap.len(), 16);
+        let input = request(8, &at_cap, &LangOptions::default());
+        let mut out = Vec::new();
+        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, 16).unwrap();
+        let response: Value = serde_json::from_slice(&out).unwrap();
+        assert_ne!(response["error"]["kind"], "invalid", "{response}");
+
+        let mut out = Vec::new();
+        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, 15).unwrap();
+        let response: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["id"], 8);
+        assert_eq!(response["error"]["kind"], "invalid");
+        assert_eq!(response["error"]["message"], "text larger than 15 bytes");
     }
 
     #[test]
@@ -564,7 +602,12 @@ mod tests {
         );
         assert_eq!(
             refused,
-            Err("the worker refused the request: m".to_string())
+            Ok(Err(ParseError {
+                line: 0,
+                message: "not scored: m".into(),
+                kind: ParseErrorKind::Refused,
+            })),
+            "a refusal is the source's failure, not the worker's"
         );
     }
 

@@ -524,3 +524,16 @@ fn json_keeps_the_real_score_and_flags_it_capped() {
     assert!(v["functions"][1].get("capped").is_none(), "{}", v["functions"][1]);
     assert_eq!(v["summary"]["worst"]["complexity"], 101);
 }
+
+#[test]
+fn a_file_of_invalid_utf8_under_the_cap_is_scored_whatever_it_decodes_to() {
+    // 4 MB of 0xFF decodes to 12 MB of U+FFFD, past the 10 MB file cap.
+    let dir = temp_dir("lossy");
+    let mut bytes = b"function f(a){ return a ? 1 : 2 }\n// ".to_vec();
+    bytes.extend(std::iter::repeat_n(0xFF, 4 * 1024 * 1024));
+    bytes.push(b'\n');
+    std::fs::write(dir.join("lossy.js"), bytes).unwrap();
+    let (stdout, stderr, code) = cmplx_in(&dir, &["lossy.js"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(row_for(&stdout, "f").starts_with("     2"), "got:\n{stdout}");
+}

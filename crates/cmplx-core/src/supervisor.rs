@@ -844,6 +844,23 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_request_fails_its_source_and_keeps_the_worker() {
+        let script = r#"
+            while IFS= read -r line; do
+                id=${line#\{\"id\":}; id=${id%%,*}
+                printf '{"id":%s,"error":{"kind":"invalid","line":0,"message":"text larger than 30 MB"}}\n' "$id"
+            done
+        "#;
+        let mut supervisor = Supervisor::new(fake(script));
+        for _ in 0..2 {
+            let error = score(&mut supervisor, "x").unwrap_err();
+            assert_eq!(error.message, "not scored: text larger than 30 MB");
+            assert_eq!(error.kind, ParseErrorKind::Refused);
+        }
+        assert_eq!(supervisor.spawned(), 1, "a refusal is not a crash");
+    }
+
+    #[test]
     fn after_a_crash_the_next_source_starts_a_fresh_worker() {
         let mut supervisor = Supervisor::new(fake(ECHO));
         assert!(score(&mut supervisor, "ok").is_ok());

@@ -343,7 +343,9 @@ fn failure_line(name: &str, e: &ParseError) -> String {
     match e.kind {
         ParseErrorKind::Syntax => format!("{name}:{}: parse error: {}", e.line, e.message),
         ParseErrorKind::TooDeep { .. } => format!("{name}:{}: {}", e.line, e.message),
-        ParseErrorKind::Crashed { .. } => format!("{name}: {}", e.message),
+        ParseErrorKind::Crashed { .. } | ParseErrorKind::Refused => {
+            format!("{name}: {}", e.message)
+        }
     }
 }
 

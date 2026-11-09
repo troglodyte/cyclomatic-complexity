@@ -249,6 +249,9 @@ impl<W: Write> Server<W> {
             Err(e @ ParseError { kind: ParseErrorKind::Crashed { .. }, .. }) => {
                 return self.crashed(uri, text, fingerprint, e)
             }
+            Err(e @ ParseError { kind: ParseErrorKind::Refused, .. }) => {
+                return self.unscored(uri, format!("{uri}: {}", e.message))
+            }
             Err(e) => return self.parse_failed(uri, &format!("{uri}: {}: {}", e.line, e.message)),
         };
         let threshold = self.settings().threshold.unwrap_or(DEFAULT_THRESHOLD);
@@ -325,6 +328,13 @@ impl<W: Write> Server<W> {
     /// from a stale version. Logged once until the message changes.
     fn too_large(&mut self, uri: &str) -> io::Result<()> {
         let message = format!("{uri}: larger than {}; not scored", size_label(self.max_bytes));
+        self.unscored(uri, message)
+    }
+
+    /// Publish no diagnostics for a document that will not be scored until
+    /// it changes (too large, or refused by the worker), forget its scores,
+    /// and log `message` once until it changes.
+    fn unscored(&mut self, uri: &str, message: String) -> io::Result<()> {
         let doc = self.docs.entry(uri.to_string()).or_default();
         doc.funcs.clear();
         if doc.last_error.as_deref() != Some(message.as_str()) {
@@ -1128,6 +1138,10 @@ mod tests {
                 printf '{"id":%s,"functions":[{"name":"f","kind":{"id":"fn","label":"fn"},"line":1,"complexity":20,"depth":0,"points":[]}]}\n' "$id"
             done
         "#;
+        server_with_worker(script, restarts)
+    }
+
+    fn server_with_worker(script: &str, restarts: RestartLimit) -> Server<Vec<u8>> {
         let supervisor = Supervisor::new(SupervisorConfig {
             command: Some(vec!["sh".into(), "-c".into(), script.into()]),
             timeout: std::time::Duration::from_secs(5),
@@ -1136,6 +1150,25 @@ mod tests {
         let mut s = Server::with_supervisor("cmplx", &Registry::all(&[&FAKE]), Vec::new(), supervisor);
         initialize(&mut s, Value::Null);
         s
+    }
+
+    #[test]
+    fn a_refused_document_has_no_diagnostics_and_is_logged_once() {
+        let script = r#"
+            while IFS= read -r line; do
+                id=${line#\{\"id\":}; id=${id%%,*}
+                printf '{"id":%s,"error":{"kind":"invalid","line":0,"message":"text larger than 30 MB"}}\n' "$id"
+            done
+        "#;
+        let mut s = server_with_worker(script, per_minute(10));
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        let messages = sent(&mut s);
+        let logs: Vec<&Value> = messages.iter().filter(|m| m["method"] == "window/logMessage").collect();
+        assert_eq!(logs.len(), 1, "{messages:?}");
+        assert_eq!(logs[0]["params"]["message"], "cmplx: file:///x/a.fk: not scored: text larger than 30 MB");
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        assert_eq!(published(&mut s), vec![json!([])], "nothing published, and no second log");
+        assert_eq!(s.supervisor.spawned(), 1);
     }
 
     fn per_minute(max: usize) -> RestartLimit {

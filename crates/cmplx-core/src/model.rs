@@ -48,6 +48,9 @@ pub enum ParseErrorKind {
     /// this source (see `supervisor`). The `ParseError`'s line is 0 and its
     /// message is the whole text to show.
     Crashed { reason: CrashReason },
+    /// The analysis worker refused the source (too large once decoded, say)
+    /// without crashing. The line is 0 and the message is the whole text.
+    Refused,
 }
 
 /// How an analysis worker failed on one source.
