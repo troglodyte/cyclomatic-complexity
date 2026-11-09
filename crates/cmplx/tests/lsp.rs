@@ -632,3 +632,60 @@ fn a_cmplx_toml_under_the_root_sets_the_threshold() {
         );
     }
 }
+
+/// Move `path`'s mtime a minute on, so a rewrite within the same second is
+/// still seen as a change.
+fn bump_mtime(path: &std::path::Path) {
+    let later = std::fs::metadata(path).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(later))
+        .unwrap();
+}
+
+#[test]
+fn editing_cmplx_toml_mid_session_changes_the_next_diagnostics() {
+    for program in RUST_SERVERS {
+        let root = std::env::temp_dir().join(format!(
+            "cmplx-lsp-reload-{program}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("cmplx.toml");
+        std::fs::write(&config, "threshold = 3\n").unwrap();
+
+        let mut s = Server::start(program);
+        s.send(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "rootUri": format!("file://{}", root.display()), "capabilities": {} }
+        }));
+        s.recv();
+        let text = branchy("f", 3);
+        s.did_open("file:///x.rs", &text);
+        assert_eq!(s.diagnostics()["diagnostics"].as_array().unwrap().len(), 1, "{program}");
+
+        std::fs::write(&config, "threshold = 10\n").unwrap();
+        bump_mtime(&config);
+        s.did_change("file:///x.rs", &text);
+        assert_eq!(
+            s.diagnostics()["diagnostics"],
+            json!([]),
+            "{program}: complexity 4 is within the new threshold of 10"
+        );
+    }
+}
+
+#[test]
+fn an_untitled_document_gets_no_diagnostics() {
+    for program in ["cmplx", "jscx", "rustcx"] {
+        let mut s = Server::start(program);
+        s.initialize();
+        s.did_open("untitled:Untitled-1", &branchy("f", 30));
+        let params = s.diagnostics();
+        assert_eq!(params["uri"], "untitled:Untitled-1");
+        assert_eq!(params["diagnostics"], json!([]), "{program}");
+    }
+}
