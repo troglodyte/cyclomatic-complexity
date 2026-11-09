@@ -15,6 +15,8 @@ pub struct OptionSpec {
     pub off_flag: Option<&'static str>,
     /// `None` means the language decides per file (e.g. jsx).
     pub default: Option<bool>,
+    /// `--help` text for the flags listed, so it says what *they* do:
+    /// `--no-logical` reads "do not count …", not "count …".
     pub help: &'static str,
 }
 

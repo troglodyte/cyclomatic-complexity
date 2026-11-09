@@ -12,7 +12,7 @@ const LOGICAL: OptionSpec = OptionSpec {
     on_flag: None,
     off_flag: Some("--no-logical"),
     default: Some(true),
-    help: "count &&, || and ?? (and their assignment forms)",
+    help: "do not count &&, || and ?? (or their assignment forms)",
 };
 const OPTIONAL_CHAIN: OptionSpec = OptionSpec {
     key: "optional-chain",
@@ -26,7 +26,7 @@ const JSX: OptionSpec = OptionSpec {
     on_flag: Some("--jsx"),
     off_flag: Some("--no-jsx"),
     default: None,
-    help: "lex JSX (default: on, except for .ts/.mts/.cts)",
+    help: "force JSX lexing on or off (default: on, except for .ts/.mts/.cts)",
 };
 const INCLUDE_DTS: OptionSpec = OptionSpec {
     key: "include-dts",
@@ -130,6 +130,28 @@ mod tests {
         let mut opts = LangOptions::default();
         opts.set(key, value);
         opts
+    }
+
+    #[test]
+    fn each_option_help_says_what_its_listed_flags_do() {
+        let help: Vec<(Option<&str>, Option<&str>, &str)> = JS
+            .options()
+            .iter()
+            .map(|o| (o.on_flag, o.off_flag, o.help))
+            .collect();
+        assert_eq!(
+            help,
+            [
+                (None, Some("--no-logical"), "do not count &&, || and ?? (or their assignment forms)"),
+                (Some("--optional-chain"), None, "count ?. as a branch"),
+                (
+                    Some("--jsx"),
+                    Some("--no-jsx"),
+                    "force JSX lexing on or off (default: on, except for .ts/.mts/.cts)"
+                ),
+                (Some("--include-dts"), None, "also scan .d.ts/.d.mts/.d.cts declaration files"),
+            ]
+        );
     }
 
     #[test]

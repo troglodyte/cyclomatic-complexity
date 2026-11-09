@@ -16,7 +16,7 @@ const LOGICAL: OptionSpec = OptionSpec {
     on_flag: None,
     off_flag: Some("--no-logical"),
     default: Some(true),
-    help: "count && and ||",
+    help: "do not count && and ||",
 };
 const QUESTION: OptionSpec = OptionSpec {
     key: "question",
@@ -30,7 +30,7 @@ const TESTS: OptionSpec = OptionSpec {
     on_flag: None,
     off_flag: Some("--no-tests"),
     default: Some(true),
-    help: "score #[test] functions and #[cfg(test)] modules",
+    help: "do not score #[test] functions or #[cfg(test)] modules",
 };
 
 static OPTIONS: [OptionSpec; 3] = [LOGICAL, QUESTION, TESTS];
@@ -107,6 +107,23 @@ mod tests {
 
     fn analyze_with(src: &str, opts: &LangOptions) -> Result<Vec<Func>, ParseError> {
         RUST.analyze(src, Path::new("a.rs"), opts)
+    }
+
+    #[test]
+    fn each_option_help_says_what_its_listed_flags_do() {
+        let help: Vec<(Option<&str>, Option<&str>, &str)> = RUST
+            .options()
+            .iter()
+            .map(|o| (o.on_flag, o.off_flag, o.help))
+            .collect();
+        assert_eq!(
+            help,
+            [
+                (None, Some("--no-logical"), "do not count && and ||"),
+                (Some("--question"), None, "count the ? operator"),
+                (None, Some("--no-tests"), "do not score #[test] functions or #[cfg(test)] modules"),
+            ]
+        );
     }
 
     #[test]
