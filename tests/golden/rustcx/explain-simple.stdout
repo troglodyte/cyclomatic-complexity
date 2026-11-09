@@ -1,0 +1,12 @@
+legacy/rustcx/fixtures/simple.rs
+    CC   Line  Kind         Name
+     1      5  fn           plain
+     5      9  fn           branchy
+           10  if
+           10  &&
+           13  for
+           14  if
+     1     21  fn           add_one
+     1     22  closure        map
+
+4 functions in 1 file · mean 2.0 · worst 5 (branchy at legacy/rustcx/fixtures/simple.rs:9)

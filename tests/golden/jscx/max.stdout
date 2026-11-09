@@ -1,0 +1,25 @@
+==> Running jscx <==
+legacy/jscx/test.js
+    CC   Line  Kind         Name
+     2      9  function     slugify
+     2     14  function     describeRatio
+    12     20  function     normalizeConfig
+    24     52  function     reduceEvents
+     6    116  function     EventList
+     3    127  arrow          map(…)
+     1    130  arrow            <anonymous>
+
+legacy/jscx/test.ts
+    CC   Line  Kind         Name
+     2     25  function     formatMoney
+     1     30  arrow        onSettled
+    14     35  function     validateOrder
+    25     71  function     applyPricingRules
+    23    140  method       route
+     1    190  method       summarize
+     4    191  arrow          reduce(…)
+
+14 functions in 2 files
+	 · mean 8.6
+	 · worst 25 (applyPricingRules at legacy/jscx/test.ts:71)
+7 functions above the limit of 3

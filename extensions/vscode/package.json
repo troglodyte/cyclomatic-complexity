@@ -1,0 +1,42 @@
+{
+  "name": "cmplx",
+  "displayName": "cmplx",
+  "description": "Cyclomatic complexity diagnostics and hover for JavaScript, TypeScript and Rust",
+  "version": "0.1.0",
+  "publisher": "troglodyte",
+  "repository": { "type": "git", "url": "https://github.com/troglodyte/cyclomatic-complexity" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Linters", "Programming Languages"],
+  "activationEvents": ["onLanguage:javascript", "onLanguage:javascriptreact", "onLanguage:typescript", "onLanguage:typescriptreact", "onLanguage:rust"],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "cmplx",
+      "properties": {
+        "cmplx.threshold": {
+          "type": ["number", "null"],
+          "default": null,
+          "minimum": 1,
+          "markdownDescription": "Functions scoring at or above this value are warnings; at or above twice it, errors. Leave `null` to use the `threshold` in `cmplx.toml`, or the built-in default if there is no such file."
+        },
+        "cmplx.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `cmplx` executable. Leave blank to resolve from `PATH`, falling back to `~/.cargo/bin/cmplx`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "test": "npm run compile && node --test out/test/*.test.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.0"
+  }
+}

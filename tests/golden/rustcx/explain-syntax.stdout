@@ -1,0 +1,11 @@
+legacy/rustcx/fixtures/syntax.rs
+    CC   Line  Kind         Name
+     2     12  method       Holder::shout
+           14  if
+     3     23  fn           ambiguous
+           25  if
+           25  &&
+     1     33  fn           r#match
+     1     49  fn           uses_macro
+
+4 functions in 1 file · mean 1.8 · worst 3 (ambiguous at legacy/rustcx/fixtures/syntax.rs:23)

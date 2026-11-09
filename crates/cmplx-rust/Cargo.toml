@@ -1,0 +1,11 @@
+[package]
+name = "cmplx-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust cyclomatic complexity analyzer behind the cmplx Language trait"
+license = "MIT"
+
+[dependencies]
+cmplx-core = { path = "../cmplx-core" }
+syn = { version = "3", default-features = false, features = ["full", "parsing", "visit", "clone-impls"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

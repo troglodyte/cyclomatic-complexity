@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "functions": 7,
+    "files": 1,
+    "mean": 10.000,
+    "limit": null,
+    "overLimit": 0
+  },
+  "functions": [
+    {"file": "<stdin>", "name": "formatMoney", "kind": "function", "line": 25, "depth": 0, "complexity": 2, "points": [{"line": 26, "branch": "?:"}]},
+    {"file": "<stdin>", "name": "onSettled", "kind": "arrow", "line": 30, "depth": 0, "complexity": 1, "points": []},
+    {"file": "<stdin>", "name": "validateOrder", "kind": "function", "line": 35, "depth": 0, "complexity": 14, "points": [{"line": 38, "branch": "if"}, {"line": 41, "branch": "if"}, {"line": 41, "branch": "||"}, {"line": 45, "branch": "for"}, {"line": 45, "branch": "??"}, {"line": 46, "branch": "if"}, {"line": 49, "branch": "if"}, {"line": 52, "branch": "if"}, {"line": 55, "branch": "if"}, {"line": 55, "branch": "&&"}, {"line": 60, "branch": "if"}, {"line": 60, "branch": "&&"}, {"line": 63, "branch": "while"}]},
+    {"file": "<stdin>", "name": "applyPricingRules", "kind": "function", "line": 71, "depth": 0, "complexity": 25, "points": [{"line": 74, "branch": "for"}, {"line": 76, "branch": "if"}, {"line": 79, "branch": "if"}, {"line": 79, "branch": "||"}, {"line": 85, "branch": "case"}, {"line": 87, "branch": "case"}, {"line": 90, "branch": "case"}, {"line": 97, "branch": "if"}, {"line": 99, "branch": "if"}, {"line": 100, "branch": "if"}, {"line": 102, "branch": "if"}, {"line": 107, "branch": "if"}, {"line": 107, "branch": "&&"}, {"line": 110, "branch": "if"}, {"line": 111, "branch": "?:"}, {"line": 113, "branch": "if"}, {"line": 113, "branch": "??"}, {"line": 116, "branch": "if"}, {"line": 119, "branch": "if"}, {"line": 119, "branch": "||"}, {"line": 122, "branch": "if"}, {"line": 127, "branch": "if"}, {"line": 130, "branch": "catch"}, {"line": 134, "branch": "?:"}]},
+    {"file": "<stdin>", "name": "route", "kind": "method", "line": 140, "depth": 0, "complexity": 23, "points": [{"line": 141, "branch": "if"}, {"line": 145, "branch": "if"}, {"line": 146, "branch": "if"}, {"line": 149, "branch": "if"}, {"line": 153, "branch": "if"}, {"line": 154, "branch": "if"}, {"line": 154, "branch": "||"}, {"line": 158, "branch": "if"}, {"line": 158, "branch": "||"}, {"line": 159, "branch": "if"}, {"line": 159, "branch": "&&"}, {"line": 162, "branch": "if"}, {"line": 165, "branch": "if"}, {"line": 165, "branch": "&&"}, {"line": 169, "branch": "if"}, {"line": 170, "branch": "if"}, {"line": 170, "branch": "&&"}, {"line": 173, "branch": "if"}, {"line": 173, "branch": "||"}, {"line": 180, "branch": "case"}, {"line": 182, "branch": "case"}, {"line": 185, "branch": "?:"}]},
+    {"file": "<stdin>", "name": "summarize", "kind": "method", "line": 190, "depth": 0, "complexity": 1, "points": []},
+    {"file": "<stdin>", "name": "reduce(…)", "kind": "arrow", "line": 191, "depth": 1, "complexity": 4, "points": [{"line": 192, "branch": "if"}, {"line": 195, "branch": "?:"}, {"line": 196, "branch": "?:"}]}
+  ]
+}

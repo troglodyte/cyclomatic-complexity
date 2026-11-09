@@ -1,0 +1,37 @@
+<idea-plugin>
+    <id>dev.cmplx.intellij</id>
+    <name>cmplx</name>
+    <vendor url="https://github.com/troglodyte/cyclomatic-complexity">Michael Harris</vendor>
+
+    <description><![CDATA[
+        Cyclomatic complexity diagnostics and hover for JavaScript, TypeScript and Rust.
+        <p>
+        Functions scoring at or above the configured threshold are reported as
+        warnings; at or above twice the threshold, as errors. Hovering a
+        function's signature or one of its branchy lines explains the score.
+        </p>
+        <p>
+        Requires the <code>cmplx</code> binary on your <code>PATH</code>
+        (<code>cargo install --path crates/cmplx</code>), or an explicit path set under
+        <b>Settings | Tools | cmplx</b>.
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- The LSP API is only present in paid JetBrains IDEs. This dependency is
+         what keeps the plugin from being installable where it cannot work. -->
+    <depends>com.intellij.modules.lsp</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <platform.lsp.integrationProvider
+                implementation="dev.cmplx.intellij.CmplxLspIntegrationProvider"/>
+
+        <applicationConfigurable
+                parentId="tools"
+                id="dev.cmplx.intellij.settings"
+                displayName="cmplx"
+                instance="dev.cmplx.intellij.CmplxConfigurable"/>
+
+        <notificationGroup id="cmplx" displayType="BALLOON"/>
+    </extensions>
+</idea-plugin>
