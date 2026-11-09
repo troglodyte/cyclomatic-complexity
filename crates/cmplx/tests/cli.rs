@@ -402,10 +402,11 @@ fn an_alias_warns_once_per_config_key_it_ignores_and_still_runs() {
 }
 
 /// A Rust file that overflows the Rust analyzer's parse stack, in debug and
-/// release builds alike: closures nested 3000 deep with no bracket between
-/// them, so the nesting cap does not catch it.
+/// release builds alike: closures nested 10,000 deep with no bracket between
+/// them, so the nesting cap does not catch it. (3000 is enough in a debug
+/// build, whose frames are larger, but not in release.)
 fn stack_overflowing_rust() -> String {
-    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(3000))
+    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(10_000))
 }
 
 const STACK_OVERFLOW: &str =

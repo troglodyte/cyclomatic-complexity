@@ -717,10 +717,10 @@ fn an_untitled_document_gets_no_diagnostics() {
     }
 }
 
-/// Closures nested 3000 deep: no bracket nesting for the cap to catch, but
-/// enough to overflow the Rust analyzer's parse stack.
+/// Closures nested 10,000 deep: no bracket nesting for the cap to catch, but
+/// enough to overflow the Rust analyzer's parse stack in debug and release.
 fn stack_overflowing_rust() -> String {
-    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(3000))
+    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(10_000))
 }
 
 impl Server {
