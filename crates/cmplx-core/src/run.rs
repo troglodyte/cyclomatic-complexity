@@ -708,6 +708,7 @@ mod tests {
             command: Some(vec!["sh".into(), "-c".into(), script.into()]),
             timeout: std::time::Duration::from_secs(5),
             restarts: crate::supervisor::RestartLimit::PerRun { max: 10 },
+            timeouts: crate::supervisor::TimeoutLimit::Unlimited,
         })
     }
 

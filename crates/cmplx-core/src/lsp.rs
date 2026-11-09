@@ -1397,6 +1397,7 @@ mod tests {
             command: Some(vec!["sh".into(), "-c".into(), script.into()]),
             timeout: std::time::Duration::from_secs(5),
             restarts,
+            timeouts: crate::supervisor::TimeoutLimit::Unlimited,
         });
         let mut s = Server::with_supervisor("cmplx", &Registry::all(&[&FAKE]), Vec::new(), supervisor);
         initialize(&mut s, Value::Null);

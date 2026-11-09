@@ -7,7 +7,9 @@
 //! One worker serves one request at a time. When it dies, closes its output,
 //! answers nonsense or takes longer than the timeout, it is killed and reaped,
 //! the source in flight fails with [`ParseErrorKind::Crashed`], and the next
-//! source starts a fresh worker, up to a restart limit. If the first worker
+//! source starts a fresh worker, up to a restart limit. A timeout is not
+//! counted as a restart (the worker was slow, not broken); the CLI instead
+//! caps timeouts with [`TimeoutLimit`]. If the first worker
 //! cannot be started, the supervisor says so once and scores in process; a
 //! restart that cannot be started fails its source, and counts as a restart.
 //!
@@ -34,6 +36,17 @@ pub const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most worker restarts in one CLI run, and in any [`RESTART_WINDOW`] of a
 /// language server session.
 pub const MAX_WORKER_RESTARTS: usize = 10;
+
+/// Most timeouts in one CLI run before each later source gets only
+/// [`FAIL_FAST_TIMEOUT`]. A timeout is not a crash: the worker was healthy,
+/// only slow, so it is replaced without counting as a restart.
+pub const MAX_TIMEOUTS_PER_RUN: usize = 10;
+
+/// The timeout once [`MAX_TIMEOUTS_PER_RUN`] is reached. Long enough for a
+/// healthy file at the size cap (a 10 MB file of one-line functions takes
+/// about 1.5 s in the release worker), short enough that a tree of hanging
+/// files costs seconds each rather than [`WORKER_TIMEOUT`].
+pub const FAIL_FAST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The rolling window the language server counts restarts in.
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
@@ -104,6 +117,16 @@ pub enum RestartLimit {
     PerWindow { max: usize, window: Duration },
 }
 
+/// How many sources get the full timeout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeoutLimit {
+    /// Every source: the language server, which remembers a text that timed
+    /// out and does not try it again for a minute.
+    Unlimited,
+    /// After `max` timeouts, each source gets `fail_fast` instead: the CLI.
+    PerRun { max: usize, fail_fast: Duration },
+}
+
 /// How a supervisor runs its worker. Injectable so tests can use fake workers.
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
@@ -111,6 +134,7 @@ pub struct SupervisorConfig {
     pub command: Option<Vec<OsString>>,
     pub timeout: Duration,
     pub restarts: RestartLimit,
+    pub timeouts: TimeoutLimit,
 }
 
 impl SupervisorConfig {
@@ -122,6 +146,10 @@ impl SupervisorConfig {
             restarts: RestartLimit::PerRun {
                 max: MAX_WORKER_RESTARTS,
             },
+            timeouts: TimeoutLimit::PerRun {
+                max: MAX_TIMEOUTS_PER_RUN,
+                fail_fast: FAIL_FAST_TIMEOUT,
+            },
         }
     }
 
@@ -132,6 +160,7 @@ impl SupervisorConfig {
                 max: MAX_WORKER_RESTARTS,
                 window: RESTART_WINDOW,
             },
+            timeouts: TimeoutLimit::Unlimited,
             ..SupervisorConfig::cli()
         }
     }
@@ -165,6 +194,11 @@ pub struct Supervisor {
     spawned: usize,
     /// When each restart happened, oldest first; never more than the limit.
     restarts: VecDeque<Instant>,
+    /// Sources that timed out so far.
+    timeouts: usize,
+    /// The last worker was killed for a timeout, so its replacement is not a
+    /// restart: the worker was slow, not broken.
+    replace_after_timeout: bool,
     next_id: u64,
     warnings: Vec<String>,
 }
@@ -182,6 +216,8 @@ impl Supervisor {
             worker: None,
             spawned: 0,
             restarts: VecDeque::new(),
+            timeouts: 0,
+            replace_after_timeout: false,
             next_id: 0,
             warnings: Vec::new(),
         }
@@ -246,12 +282,43 @@ impl Supervisor {
             text: src,
             opts,
         });
-        match worker.exchange(request, self.next_id, config.timeout) {
+        let timeout = self.timeout_now(&config);
+        match worker.exchange(request, self.next_id, timeout) {
             Ok(result) => {
                 self.worker = Some(worker);
                 result
             }
-            Err(failure) => Err(crashed(lang, worker.finish(failure), &config)),
+            Err(failure) => {
+                let reason = worker.finish(failure);
+                if reason != CrashReason::Timeout {
+                    return Err(crashed(lang, reason, &config));
+                }
+                self.timeouts += 1;
+                self.replace_after_timeout = true;
+                let mut error = crashed(lang, reason, &config);
+                if timeout != config.timeout {
+                    error.message = format!(
+                        "not scored: the {} analyzer took longer than {} \
+                         (cut from {} after {} timeouts in this run)",
+                        lang.display_name(),
+                        duration_label(timeout),
+                        duration_label(config.timeout),
+                        self.timeouts - 1
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// The timeout for the next source: the configured one, or the shorter
+    /// fail-fast one once the run has had its share of timeouts.
+    fn timeout_now(&self, config: &SupervisorConfig) -> Duration {
+        match config.timeouts {
+            TimeoutLimit::PerRun { max, fail_fast } if self.timeouts >= max => {
+                fail_fast.min(config.timeout)
+            }
+            TimeoutLimit::PerRun { .. } | TimeoutLimit::Unlimited => config.timeout,
         }
     }
 
@@ -264,7 +331,9 @@ impl Supervisor {
                 return Ok(worker);
             }
         }
-        if self.spawned > 0 {
+        // Replacing a worker killed for a timeout is not a restart.
+        let after_timeout = std::mem::take(&mut self.replace_after_timeout);
+        if self.spawned > 0 && !after_timeout {
             self.claim_restart(config.restarts)?;
         }
         let program = config.program().map_err(Unavailable::Spawn)?;
@@ -822,6 +891,7 @@ mod tests {
             command: Some(vec!["sh".into(), "-c".into(), script.into()]),
             timeout: Duration::from_secs(5),
             restarts: RestartLimit::PerRun { max: 3 },
+            timeouts: TimeoutLimit::Unlimited,
         }
     }
 
@@ -926,6 +996,63 @@ mod tests {
             "not scored: the Fake analyzer took longer than 300 ms"
         );
         assert_eq!(reason(result), CrashReason::Timeout);
+    }
+
+    /// [`ECHO`], except that a request containing `HANG` never gets an answer.
+    const HANG_OR_ECHO: &str = r#"
+        while IFS= read -r line; do
+            case "$line" in *HANG*) exec sleep 30;; esac
+            id=${line#\{\"id\":}; id=${id%%,*}
+            printf '{"id":%s,"functions":[{"n":"f","k":"fn","l":1,"c":2}]}\n' "$id"
+        done
+    "#;
+
+    #[test]
+    fn timeouts_do_not_use_up_the_restarts() {
+        for restarts in [
+            RestartLimit::PerRun { max: 3 },
+            RestartLimit::PerWindow { max: 3, window: Duration::from_secs(60) },
+        ] {
+            let config = SupervisorConfig {
+                timeout: Duration::from_millis(100),
+                restarts,
+                timeouts: TimeoutLimit::PerRun { max: 10, fail_fast: Duration::from_millis(50) },
+                ..fake(HANG_OR_ECHO)
+            };
+            let mut supervisor = Supervisor::new(config);
+            for _ in 0..11 {
+                assert_eq!(reason(score(&mut supervisor, "HANG")), CrashReason::Timeout);
+            }
+            assert!(score(&mut supervisor, "ok").is_ok(), "{restarts:?}: a slow worker is not a crashing one");
+            assert_eq!(supervisor.spawned(), 12);
+        }
+    }
+
+    #[test]
+    fn past_the_timeout_cap_a_hung_source_fails_fast_and_healthy_ones_are_scored() {
+        let config = SupervisorConfig {
+            timeout: Duration::from_millis(800),
+            timeouts: TimeoutLimit::PerRun { max: 2, fail_fast: Duration::from_millis(100) },
+            ..fake(HANG_OR_ECHO)
+        };
+        let mut supervisor = Supervisor::new(config);
+        for _ in 0..2 {
+            let started = Instant::now();
+            let result = score(&mut supervisor, "HANG");
+            assert!(started.elapsed() >= Duration::from_millis(800), "the full timeout first");
+            assert_eq!(result.unwrap_err().message, "not scored: the Fake analyzer took longer than 800 ms");
+        }
+        assert!(score(&mut supervisor, "ok").is_ok());
+        let started = Instant::now();
+        let result = score(&mut supervisor, "HANG");
+        assert!(started.elapsed() < Duration::from_millis(600), "took {:?}", started.elapsed());
+        assert_eq!(
+            result.as_ref().unwrap_err().message,
+            "not scored: the Fake analyzer took longer than 100 ms \
+             (cut from 800 ms after 2 timeouts in this run)"
+        );
+        assert_eq!(reason(result), CrashReason::Timeout);
+        assert!(score(&mut supervisor, "ok").is_ok(), "healthy sources are still scored");
     }
 
     #[test]
@@ -1200,6 +1327,12 @@ mod tests {
     fn the_production_limits() {
         assert_eq!(WORKER_TIMEOUT, Duration::from_secs(10));
         assert_eq!(MAX_WORKER_RESTARTS, 10);
+        assert_eq!(MAX_TIMEOUTS_PER_RUN, 10);
+        assert_eq!(
+            SupervisorConfig::cli().timeouts,
+            TimeoutLimit::PerRun { max: MAX_TIMEOUTS_PER_RUN, fail_fast: FAIL_FAST_TIMEOUT }
+        );
+        assert_eq!(SupervisorConfig::lsp().timeouts, TimeoutLimit::Unlimited);
         assert_eq!(MAX_WORKER_STDERR, 64 * 1024);
         assert_eq!(
             crash_message("Rust", &CrashReason::Timeout, &SupervisorConfig::cli()),
