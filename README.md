@@ -54,7 +54,7 @@ extension to assume (it chooses JS versus TS/JSX lexing).
 | `-j, --json` | machine-readable output |
 | `-e, --explain` | list the decision points behind each score |
 | `--ext <EXT>` | extension to assume for stdin |
-| `--lsp` | run as a Language Server over stdio |
+| `--lsp` | run as a Language Server over stdio; takes no paths, `-` or output options |
 | `-h, --help` | print help |
 | `-V, --version` | print version |
 
@@ -75,7 +75,9 @@ extension to assume (it chooses JS versus TS/JSX lexing).
 | `--question` | count the `?` operator as a branch (off by default) |
 | `--no-tests` | skip `#[test]` functions and `#[cfg(test)]` modules |
 
-A language's own flags are accepted only when that language is active.
+A language's own flags are accepted only when that language is active. Two
+opposite flags for one option, such as `--jsx --no-jsx`, are an argument error
+rather than the last one winning.
 
 Directories are walked recursively, skipping `node_modules`, `dist`, `build`,
 `coverage`, `.next`, `target`, `__pycache__`, `.venv`, `venv`, `vendor` and VCS

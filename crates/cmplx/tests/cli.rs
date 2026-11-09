@@ -575,3 +575,14 @@ fn config_is_found_from_the_scanned_path_not_the_working_directory() {
     let (_, stderr, code) = cmplx_in(&elsewhere, &[proj.join("src").to_str().unwrap()]);
     assert_eq!(code, 1, "pick scores 2, over /proj/cmplx.toml's max of 1; stderr:\n{stderr}");
 }
+
+#[test]
+fn contradictory_or_lsp_incompatible_arguments_exit_two() {
+    let dir = temp_dir("bad-args");
+    let (_, stderr, code) = cmplx_in(&dir, &["--jsx", "--no-jsx", "."]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr, "cmplx: --jsx and --no-jsx contradict each other\n");
+    let (_, stderr, code) = cmplx_in(&dir, &["--lsp", "."]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr, "cmplx: --lsp takes no paths or output options\n");
+}

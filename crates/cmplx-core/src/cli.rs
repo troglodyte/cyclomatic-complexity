@@ -73,6 +73,9 @@ struct Parser<'a> {
     selected: Vec<Lang>,
     /// Option flags in command-line order, checked against the active set at the end.
     option_flags: Vec<String>,
+    /// An output option was given (`--min`, `--max`, `--top`, `--sort`,
+    /// `--json`, `--explain`, `--no-header` or `--ext`), which `--lsp` refuses.
+    output_option: bool,
 }
 
 enum Step {
@@ -98,7 +101,11 @@ impl Parser<'_> {
             .find(|(s, l, _)| flag == *s || flag == *l)
         {
             let value = take_value(args, i, flag, inline)?;
+            self.output_option = true;
             return self.value(*kind, flag, &value).map(|()| Step::Next);
+        }
+        if matches!(arg, "-s" | "--sort" | "-j" | "--json" | "-e" | "--explain" | "--no-header") {
+            self.output_option = true;
         }
         match arg {
             "--" => *flags_done = true,
@@ -178,6 +185,10 @@ impl Parser<'_> {
             reg.langs().iter().filter(chosen).copied().collect()
         };
         self.apply_option_flags()?;
+        let lsp_misused = self.output_option || self.cli.stdin || !self.cli.paths.is_empty();
+        if self.cli.lsp && lsp_misused {
+            return Err("--lsp takes no paths or output options".to_string());
+        }
         let mut cli = self.cli;
         if cli.stdin {
             check_stdin_language(&cli, reg)?;
@@ -188,7 +199,12 @@ impl Parser<'_> {
         Ok(cli)
     }
 
+    /// Set the options the held-back flags name. A flag no active language
+    /// declares is an error, and so is a flag whose option an earlier flag set
+    /// the other way (`--jsx --no-jsx`).
     fn apply_option_flags(&mut self) -> Result<(), String> {
+        // (language id, option key, value, the flag that set it)
+        let mut set: Vec<(&str, &str, bool, &str)> = Vec::new();
         for flag in &self.option_flags {
             let mut declared = false;
             for lang in &self.cli.active {
@@ -196,8 +212,15 @@ impl Parser<'_> {
                     let value = match (spec.on_flag, spec.off_flag) {
                         (Some(on), _) if on == flag => true,
                         (_, Some(off)) if off == flag => false,
-                        _ => continue,
+                        _ => continue, // this option has no such flag
                     };
+                    let earlier = set
+                        .iter()
+                        .find(|(id, key, was, _)| *id == lang.id() && *key == spec.key && *was != value);
+                    if let Some((_, _, _, first)) = earlier {
+                        return Err(format!("{first} and {flag} contradict each other"));
+                    }
+                    set.push((lang.id(), spec.key, value, flag));
                     self.cli.flags.set_option(*lang, spec.key, value);
                     declared = true;
                 }
@@ -294,6 +317,7 @@ pub fn parse_args(
         reg,
         selected: Vec::new(),
         option_flags: Vec::new(),
+        output_option: false,
     };
     let (mut i, mut flags_done) = (0, false);
     while i < args.len() {

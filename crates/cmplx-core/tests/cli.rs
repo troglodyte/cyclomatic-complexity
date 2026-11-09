@@ -235,9 +235,11 @@ fn on_and_off_flags_set_their_values() {
 }
 
 #[test]
-fn the_last_of_conflicting_flags_wins() {
-    let c = jscx(&["--jsx", "--no-jsx", "x"]);
-    assert_eq!(opt(&c, &JS, "jsx"), Some(false));
+fn opposite_flags_for_one_option_contradict_each_other() {
+    let err = |list: &[&str]| parse_args("jscx", &args(list), &js_alias()).unwrap_err();
+    assert_eq!(err(&["--jsx", "--no-jsx", "x"]), "--jsx and --no-jsx contradict each other");
+    assert_eq!(err(&["--no-jsx", "x", "--jsx"]), "--no-jsx and --jsx contradict each other");
+    assert_eq!(opt(&jscx(&["--jsx", "--jsx", "x"]), &JS, "jsx"), Some(true), "a repeat is fine");
 }
 
 #[test]
@@ -298,6 +300,25 @@ fn max_is_recorded_for_the_file_layer_merge() {
     assert_eq!(c.max, Some(15));
     assert_eq!(c.flags.max, Some(15));
     assert_eq!(cmplx(&["x"]).flags.max, None);
+}
+
+#[test]
+fn lsp_with_paths_stdin_or_output_options_is_an_argument_error() {
+    for list in [
+        &["--lsp", "src"][..],
+        &["--lsp", "--js", "-"],
+        &["--json", "--lsp"],
+        &["--lsp", "--explain"],
+        &["--lsp", "--sort"],
+        &["--lsp", "--no-header"],
+        &["--lsp", "--min", "2"],
+        &["--lsp", "--max", "2"],
+        &["--lsp", "--top", "2"],
+        &["--lsp", "--js", "--ext", "ts"],
+    ] {
+        assert_eq!(cmplx_err(list), "--lsp takes no paths or output options", "{list:?}");
+    }
+    assert!(cmplx(&["--lsp", "--js", "--no-logical"]).lsp, "language flags and options are fine");
 }
 
 #[test]
