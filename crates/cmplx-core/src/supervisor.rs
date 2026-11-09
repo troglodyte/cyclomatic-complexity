@@ -17,7 +17,7 @@
 use crate::language::{analyze_bounded, Lang, LangOptions};
 use crate::model::{CrashReason, Func, ParseError, ParseErrorKind, Termination};
 use crate::run::MAX_FILE_BYTES;
-use crate::worker::{self, Line, Request, WORKER_FLAG};
+use crate::worker::{self, Line, Request, RESPONSE_MARKER, WORKER_FLAG};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, BufReader, Read, Write};
@@ -42,10 +42,10 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// worker never blocks on a full pipe.
 pub const MAX_WORKER_STDERR: usize = 64 * 1024;
 
-/// Longest response line read. A function needs a few source bytes and its
-/// JSON row takes tens of bytes, so this leaves a wide margin over any
-/// response to a source of [`MAX_FILE_BYTES`].
-const MAX_RESPONSE_BYTES: u64 = MAX_FILE_BYTES * 64;
+/// Longest response line read. The densest real source measured (one-line
+/// functions full of `&&`/`||`) answers with about 4.7 bytes of JSON per
+/// source byte; 16 leaves more than three times that.
+const MAX_RESPONSE_BYTES: u64 = MAX_FILE_BYTES * 16;
 
 /// How long a worker that closed its output gets to exit before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
@@ -59,6 +59,10 @@ const EXIT_POLLS: u32 = 200;
 /// How long to wait, once a worker is reaped, for the rest of its stderr.
 /// Only a grandchild still holding the pipe makes this wait at all.
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The last stderr bytes kept beside the first [`MAX_WORKER_STDERR`]: the
+/// runtime's stack-overflow report comes last, after whatever came first.
+const STDERR_TAIL_BYTES: usize = 4 * 1024;
 
 /// Read size for worker stderr.
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
@@ -231,8 +235,12 @@ impl Supervisor {
 
     /// The running worker, or a new one if the restart limit allows.
     fn take_worker(&mut self, config: &SupervisorConfig) -> Result<Worker, Unavailable> {
-        if let Some(worker) = self.worker.take() {
-            return Ok(worker);
+        // One that died while idle is reaped by its drop and replaced: no
+        // source was in flight, so none fails, but it counts as a restart.
+        if let Some(mut worker) = self.worker.take() {
+            if worker.is_alive() {
+                return Ok(worker);
+            }
         }
         if self.spawned > 0 {
             self.claim_restart(config.restarts)?;
@@ -366,14 +374,17 @@ const SIGABRT: i32 = 6;
 const SIGSEGV: i32 = 11;
 
 /// How a worker that ended on its own failed, from its exit and its stderr.
-fn classify(termination: Termination, stderr: &str) -> CrashReason {
+/// `head` is the start of its stderr, quoted; `tail` the end, where the
+/// runtime reports a stack overflow.
+fn classify(termination: Termination, head: &str, tail: &str) -> CrashReason {
     let overflow_signal = matches!(termination, Termination::Signal(SIGABRT | SIGSEGV));
-    if overflow_signal && stderr.contains(STACK_OVERFLOW_TEXT) {
+    let overflow_text = head.contains(STACK_OVERFLOW_TEXT) || tail.contains(STACK_OVERFLOW_TEXT);
+    if overflow_signal && overflow_text {
         return CrashReason::StackOverflow;
     }
     CrashReason::Exited {
         termination,
-        stderr: first_line(stderr),
+        stderr: first_line(head),
     }
 }
 
@@ -427,7 +438,7 @@ struct Worker {
     /// To the writer thread; dropping it closes the worker's stdin.
     requests: Option<Sender<Vec<u8>>>,
     events: Receiver<Event>,
-    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<StderrLog>>,
     /// Signalled once the stderr thread has read to the end.
     stderr_done: Receiver<()>,
 }
@@ -467,7 +478,7 @@ impl Worker {
     ) -> io::Result<(
         Sender<Vec<u8>>,
         Receiver<Event>,
-        Arc<Mutex<Vec<u8>>>,
+        Arc<Mutex<StderrLog>>,
         Receiver<()>,
     )> {
         let missing = |name| io::Error::other(format!("the worker has no {name} pipe"));
@@ -477,7 +488,7 @@ impl Worker {
         let (requests, requests_rx) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let (done_tx, stderr_done) = mpsc::channel();
-        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let buffer = Arc::new(Mutex::new(StderrLog::default()));
         let writer_events = events_tx.clone();
         let collected = Arc::clone(&buffer);
         thread::Builder::new()
@@ -499,6 +510,9 @@ impl Worker {
         id: u64,
         timeout: Duration,
     ) -> Result<Result<Vec<Func>, ParseError>, Failure> {
+        // The response marker drops what the last request wrote, however
+        // late it arrives; this drops anything written while idle, from a
+        // worker that does not write markers.
         lock(&self.stderr).clear();
         let requests = self.requests.as_ref().ok_or(Failure::Closed)?;
         // A failed send means the writer thread ended: the worker's stdin broke.
@@ -530,21 +544,39 @@ impl Worker {
                 CrashReason::BadResponse { detail }
             }
             Failure::Closed => {
-                let termination = match exit_within_grace(&mut self.child) {
-                    Ok(status) => termination(&status),
-                    Err(_) => Termination::Unknown,
-                };
-                classify(termination, &self.drained_stderr())
+                let status = exit_within_grace(&mut self.child);
+                let (head, tail) = self.drained_stderr();
+                match status {
+                    Ok(status) => classify(termination(&status), &head, &tail),
+                    // Quote why there is no status in place of the stderr line.
+                    Err(e) => classify(
+                        Termination::Unknown,
+                        &format!("could not read its exit status: {e}\n{head}"),
+                        &tail,
+                    ),
+                }
             }
         }
     }
 
-    /// The stderr of the request in flight, once the worker has gone.
-    fn drained_stderr(&self) -> String {
-        // Done or disconnected: the buffer is final. Timed out: a grandchild
+    /// The head and tail of the stderr of the request in flight, once the
+    /// worker has gone.
+    fn drained_stderr(&self) -> (String, String) {
+        // Done or disconnected: the log is final. Timed out: a grandchild
         // holds the pipe open, so use what arrived in time.
         let _drained = self.stderr_done.recv_timeout(STDERR_DRAIN_TIMEOUT);
-        String::from_utf8_lossy(&lock(&self.stderr)).into_owned()
+        let log = lock(&self.stderr);
+        (String::from_utf8_lossy(&log.head).into_owned(), log.tail_text())
+    }
+
+    /// Whether the worker is still there to serve: not exited, and with
+    /// nothing said since its last response (anything would be its end).
+    fn is_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => matches!(self.events.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            // Exited; or its state cannot be read, so a fresh one is safer.
+            Ok(Some(_)) | Err(_) => false,
+        }
     }
 }
 
@@ -584,13 +616,48 @@ fn exit_within_grace(child: &mut Child) -> io::Result<ExitStatus> {
     stop(child)
 }
 
-/// Append as much of `bytes` as fits under [`MAX_WORKER_STDERR`].
-fn keep_capped(kept: &mut Vec<u8>, bytes: &[u8]) {
-    let room = MAX_WORKER_STDERR.saturating_sub(kept.len());
-    kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+/// A worker's stderr since its last response: the first
+/// [`MAX_WORKER_STDERR`] bytes and the last [`STDERR_TAIL_BYTES`].
+#[derive(Default)]
+struct StderrLog {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
 }
 
-fn lock(buffer: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+impl StderrLog {
+    fn clear(&mut self) {
+        self.head.clear();
+        self.tail.clear();
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let room = MAX_WORKER_STDERR.saturating_sub(self.head.len());
+        self.head.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        let kept = &bytes[bytes.len().saturating_sub(STDERR_TAIL_BYTES)..];
+        self.tail.extend(kept);
+        let excess = self.tail.len().saturating_sub(STDERR_TAIL_BYTES);
+        self.tail.drain(..excess);
+    }
+
+    /// Take a chunk as read: whatever precedes the last response marker in
+    /// it belongs to a request already answered, so it is dropped.
+    fn take_chunk(&mut self, chunk: &[u8]) {
+        match chunk.iter().rposition(|&b| b == RESPONSE_MARKER) {
+            Some(marker) => {
+                self.clear();
+                self.push(&chunk[marker + 1..]);
+            }
+            None => self.push(chunk),
+        }
+    }
+
+    fn tail_text(&self) -> String {
+        let (front, back) = self.tail.as_slices();
+        String::from_utf8_lossy(&[front, back].concat()).into_owned()
+    }
+}
+
+fn lock(buffer: &Mutex<StderrLog>) -> std::sync::MutexGuard<'_, StderrLog> {
     // A panic elsewhere cannot leave a byte buffer inconsistent.
     buffer.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -620,7 +687,10 @@ fn read_responses(stdout: ChildStdout, events: Sender<Event>) {
         let (event, last) = match worker::read_line_capped(&mut reader, MAX_RESPONSE_BYTES) {
             Ok(Line::Text(line)) => (Event::Response(line), false),
             Ok(Line::TooLong) => (Event::TooLong, true),
-            Ok(Line::Eof) | Err(_) => (Event::Closed, true),
+            // A line cut off by the worker's end is not a response; its exit
+            // status says what happened. So does it for a read error: the
+            // pipe only fails when the worker has gone.
+            Ok(Line::Unterminated(_) | Line::Eof) | Err(_) => (Event::Closed, true),
         };
         if events.send(event).is_err() || last {
             return;
@@ -631,16 +701,15 @@ fn read_responses(stdout: ChildStdout, events: Sender<Event>) {
 /// Keep the first [`MAX_WORKER_STDERR`] bytes of stderr since the last clear,
 /// reading and dropping the rest, until stderr ends (bounded by the worker's
 /// life). Then signal `done`.
-fn collect_stderr(mut stderr: ChildStderr, buffer: Arc<Mutex<Vec<u8>>>, done: Sender<()>) {
+fn collect_stderr(mut stderr: ChildStderr, buffer: Arc<Mutex<StderrLog>>, done: Sender<()>) {
     let mut chunk = [0u8; STDERR_CHUNK_BYTES];
     loop {
         match stderr.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => keep_capped(&mut lock(&buffer), &chunk[..n]),
+            Ok(n) => lock(&buffer).take_chunk(&chunk[..n]),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => {
-                let mut kept = lock(&buffer);
-                kept.extend_from_slice(format!("\n(stderr unreadable: {e})\n").as_bytes());
+                lock(&buffer).push(format!("\n(stderr unreadable: {e})\n").as_bytes());
                 break;
             }
         }
@@ -876,6 +945,93 @@ mod tests {
     }
 
     #[test]
+    fn the_overflow_text_after_a_flood_of_stderr_is_still_found() {
+        let script = format!(
+            "read -r line; echo first >&2; head -c {} /dev/zero | tr '\\0' 'x' >&2; \
+             echo >&2; echo \"thread 'parse' has overflowed its stack\" >&2; kill -ABRT $$",
+            MAX_WORKER_STDERR * 3
+        );
+        assert_eq!(
+            reason(score(&mut Supervisor::new(fake(&script)), "x")),
+            CrashReason::StackOverflow
+        );
+    }
+
+    #[test]
+    fn stderr_keeps_its_head_and_a_tail() {
+        let mut log = StderrLog::default();
+        log.push(b"first line\n");
+        log.push(&vec![b'x'; MAX_WORKER_STDERR * 2]);
+        log.push(b"\nlast words");
+        assert_eq!(log.head.len(), MAX_WORKER_STDERR);
+        assert!(log.head.starts_with(b"first line\n"));
+        assert_eq!(log.tail.len(), STDERR_TAIL_BYTES);
+        assert!(log.tail_text().ends_with("x\nlast words"));
+    }
+
+    #[test]
+    fn a_partial_response_line_at_exit_is_classified_by_the_exit_not_as_bad() {
+        let script = r#"read -r line; printf '{"id":1,"functions":['; echo dying >&2; kill -ABRT $$"#;
+        assert_eq!(
+            reason(score(&mut Supervisor::new(fake(script)), "x")),
+            CrashReason::Exited {
+                termination: Termination::Signal(6),
+                stderr: "dying".into()
+            }
+        );
+    }
+
+    #[test]
+    fn stderr_written_before_a_response_marker_is_not_blamed_on_the_next_request() {
+        let script = r#"
+            read -r line
+            printf '{"id":1,"functions":[]}\n'
+            sleep 0.2
+            echo stale >&2
+            printf '\036' >&2
+            read -r line
+            echo boom >&2
+            exit 3
+        "#;
+        let mut supervisor = Supervisor::new(fake(script));
+        assert!(score(&mut supervisor, "x").is_ok());
+        assert_eq!(
+            score(&mut supervisor, "x").unwrap_err().message,
+            "not scored: the Fake analyzer crashed (exit code 3): boom"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_died_while_idle_is_replaced_without_failing_the_next_source() {
+        let script = r#"
+            read -r line
+            id=${line#\{\"id\":}; id=${id%%,*}
+            printf '{"id":%s,"functions":[]}\n' "$id"
+            exit 0
+        "#;
+        let config = SupervisorConfig {
+            restarts: RestartLimit::PerRun { max: 1 },
+            ..fake(script)
+        };
+        let mut supervisor = Supervisor::new(config);
+        assert!(score(&mut supervisor, "x").is_ok());
+        thread::sleep(Duration::from_millis(300));
+        assert!(score(&mut supervisor, "x").is_ok(), "replaced silently");
+        assert_eq!(supervisor.spawned(), 2);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            reason(score(&mut supervisor, "x")),
+            CrashReason::GaveUp,
+            "the replacement counted as a restart"
+        );
+    }
+
+    #[test]
+    fn the_response_cap_is_sixteen_times_the_file_cap() {
+        assert_eq!(MAX_RESPONSE_BYTES, MAX_FILE_BYTES * 16);
+    }
+
+    #[test]
     fn after_a_crash_the_next_source_starts_a_fresh_worker() {
         let mut supervisor = Supervisor::new(fake(ECHO));
         assert!(score(&mut supervisor, "ok").is_ok());
@@ -1044,12 +1200,22 @@ mod tests {
 
     #[test]
     fn stderr_is_kept_up_to_the_cap() {
-        let mut kept = vec![b'a'; MAX_WORKER_STDERR - 2];
-        keep_capped(&mut kept, b"xyz");
-        assert_eq!(kept.len(), MAX_WORKER_STDERR);
-        assert!(kept.ends_with(b"xy"));
-        keep_capped(&mut kept, b"more");
-        assert_eq!(kept.len(), MAX_WORKER_STDERR);
+        let mut log = StderrLog::default();
+        log.push(&vec![b'a'; MAX_WORKER_STDERR - 2]);
+        log.push(b"xyz");
+        assert_eq!(log.head.len(), MAX_WORKER_STDERR);
+        assert!(log.head.ends_with(b"xy"));
+        log.push(b"more");
+        assert_eq!(log.head.len(), MAX_WORKER_STDERR);
+    }
+
+    #[test]
+    fn a_response_marker_drops_the_stderr_before_it() {
+        let mut log = StderrLog::default();
+        log.take_chunk(b"old");
+        log.take_chunk(b"stale\x1enew");
+        assert_eq!(log.head, b"new");
+        assert_eq!(log.tail_text(), "new");
     }
 
     #[test]

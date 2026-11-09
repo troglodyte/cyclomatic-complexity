@@ -92,7 +92,8 @@ fn serve_lsp(program: &'static str, reg: &Registry) -> ExitCode {
 /// Serve analysis requests on stdio (see [`crate::worker`]). Only a broken
 /// stdio ends it early; that is reported on stderr, since stdout is the protocol.
 fn serve_worker(program: &'static str, reg: &Registry) -> ExitCode {
-    match worker::serve(reg, &mut io::stdin().lock(), &mut io::stdout().lock()) {
+    let (stdin, stdout, stderr) = (io::stdin(), io::stdout(), io::stderr());
+    match worker::serve(reg, &mut stdin.lock(), &mut stdout.lock(), &mut stderr.lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{program}: {WORKER_FLAG}: {e}");

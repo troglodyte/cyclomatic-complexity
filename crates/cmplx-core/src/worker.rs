@@ -46,6 +46,13 @@ pub const MAX_TEXT_BYTES: u64 = MAX_FILE_BYTES * 3;
 pub(crate) const MAX_REQUEST_BYTES: u64 =
     MAX_FILE_BYTES * MAX_ESCAPE_GROWTH + REQUEST_OVERHEAD_BYTES;
 
+/// Written to stderr after each response, so the supervisor can tell stderr
+/// written while serving one request from stderr about the next.
+pub(crate) const RESPONSE_MARKER: u8 = 0x1E;
+
+/// Longest kind id, kind label or branch name a supervisor accepts.
+const MAX_INTERNED_BYTES: usize = 64;
+
 /// Most distinct kind ids, kind labels and branch names a supervisor accepts
 /// from its workers. Each is kept for the life of the process (the model
 /// holds `&'static str`), so a worker cannot grow memory without bound.
@@ -66,12 +73,14 @@ pub(crate) enum Line {
     Eof,
     /// The line without its `\n`.
     Text(Vec<u8>),
+    /// A last line that ended without `\n`: the writer stopped mid-line.
+    Unterminated(Vec<u8>),
     /// Longer than the cap; only the cap and one more byte were read.
     TooLong,
 }
 
 /// Read one `\n`-terminated line of at most `max` bytes (without the `\n`).
-/// A last line without `\n` counts. A longer line is not read past `max + 1`
+/// A last line without `\n` comes back as [`Line::Unterminated`]. A longer line is not read past `max + 1`
 /// bytes, so the stream is then out of step and must be abandoned.
 pub(crate) fn read_line_capped(input: &mut impl BufRead, max: u64) -> io::Result<Line> {
     let mut bytes = Vec::new();
@@ -79,13 +88,17 @@ pub(crate) fn read_line_capped(input: &mut impl BufRead, max: u64) -> io::Result
     if read == 0 {
         return Ok(Line::Eof);
     }
-    if bytes.last() == Some(&b'\n') {
+    let terminated = bytes.last() == Some(&b'\n');
+    if terminated {
         bytes.pop();
     }
     if bytes.len() as u64 > max {
         return Ok(Line::TooLong);
     }
-    Ok(Line::Text(bytes))
+    Ok(match terminated {
+        true => Line::Text(bytes),
+        false => Line::Unterminated(bytes),
+    })
 }
 
 /// The request as one line, `\n` included.
@@ -109,8 +122,13 @@ pub fn encode_request(request: &Request) -> String {
 /// of `reg` it names. The loop is bounded by the input: one response per
 /// request line. A line over [`MAX_REQUEST_BYTES`] is refused and ends the
 /// loop, since the rest of it cannot be told from the next request.
-pub fn serve(reg: &Registry, input: &mut impl BufRead, out: &mut impl Write) -> io::Result<()> {
-    serve_with_cap(reg, input, out, MAX_TEXT_BYTES)
+pub fn serve(
+    reg: &Registry,
+    input: &mut impl BufRead,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<()> {
+    serve_with_cap(reg, input, out, err, MAX_TEXT_BYTES)
 }
 
 /// [`serve`], refusing texts over `max_text` bytes rather than [`MAX_TEXT_BYTES`].
@@ -118,18 +136,22 @@ fn serve_with_cap(
     reg: &Registry,
     input: &mut impl BufRead,
     out: &mut impl Write,
+    err: &mut impl Write,
     max_text: u64,
 ) -> io::Result<()> {
     loop {
         let response = match read_line_capped(input, MAX_REQUEST_BYTES)? {
             Line::Eof => return Ok(()),
-            Line::Text(line) => respond(reg, &line, max_text),
+            // A last request without `\n` is still a whole request.
+            Line::Text(line) | Line::Unterminated(line) => respond(reg, &line, max_text),
             Line::TooLong => {
                 let message = format!("request longer than {} bytes", MAX_REQUEST_BYTES);
                 return write_line(out, &invalid(Value::Null, &message));
             }
         };
         write_line(out, &response)?;
+        err.write_all(&[RESPONSE_MARKER])?;
+        err.flush()?;
     }
 }
 
@@ -314,9 +336,12 @@ fn number(v: &Value) -> Option<u32> {
     v.as_u64().and_then(|n| u32::try_from(n).ok())
 }
 
-/// `s` as a `&'static str`, leaked once per distinct value and at most
-/// [`MAX_INTERNED`] of them.
+/// `s` as a `&'static str`, leaked once per distinct value: at most
+/// [`MAX_INTERNED`] of them, each at most [`MAX_INTERNED_BYTES`] long.
 fn intern(s: &str) -> Result<&'static str, String> {
+    if s.len() > MAX_INTERNED_BYTES {
+        return Err(format!("a name longer than {MAX_INTERNED_BYTES} bytes"));
+    }
     static INTERNED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
     let mut interned = INTERNED.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(&kept) = interned.get(s) {
@@ -430,7 +455,7 @@ mod tests {
     /// Serve `input` and return each response line, parsed.
     fn served(input: &str) -> Vec<Value> {
         let mut out = Vec::new();
-        serve(&reg(), &mut input.as_bytes(), &mut out).unwrap();
+        serve(&reg(), &mut input.as_bytes(), &mut out, &mut io::sink()).unwrap();
         String::from_utf8(out)
             .unwrap()
             .lines()
@@ -470,7 +495,7 @@ mod tests {
         opts.set("shout", true);
         let input = request(3, "f 2\ng 1\n", &opts);
         let mut out = Vec::new();
-        serve(&reg(), &mut input.as_bytes(), &mut out).unwrap();
+        serve(&reg(), &mut input.as_bytes(), &mut out, &mut io::sink()).unwrap();
         let funcs = decode_response(out.strip_suffix(b"\n").unwrap(), 3)
             .unwrap()
             .unwrap();
@@ -492,7 +517,7 @@ mod tests {
             &LangOptions::default(),
         );
         let mut out = Vec::new();
-        serve(&reg(), &mut format!("{syntax}{deep}").as_bytes(), &mut out).unwrap();
+        serve(&reg(), &mut format!("{syntax}{deep}").as_bytes(), &mut out, &mut io::sink()).unwrap();
         let lines: Vec<&[u8]> = out
             .split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
@@ -539,12 +564,12 @@ mod tests {
         assert_eq!(at_cap.len(), 16);
         let input = request(8, &at_cap, &LangOptions::default());
         let mut out = Vec::new();
-        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, 16).unwrap();
+        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, &mut io::sink(), 16).unwrap();
         let response: Value = serde_json::from_slice(&out).unwrap();
         assert_ne!(response["error"]["kind"], "invalid", "{response}");
 
         let mut out = Vec::new();
-        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, 15).unwrap();
+        serve_with_cap(&reg(), &mut input.as_bytes(), &mut out, &mut io::sink(), 15).unwrap();
         let response: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(response["id"], 8);
         assert_eq!(response["error"]["kind"], "invalid");
@@ -568,7 +593,7 @@ mod tests {
         );
         assert_eq!(
             read_line_capped(&mut capped, 10).unwrap(),
-            Line::Text(b"ab".to_vec())
+            Line::Unterminated(b"ab".to_vec())
         );
         assert_eq!(read_line_capped(&mut capped, 10).unwrap(), Line::Eof);
     }
@@ -608,6 +633,27 @@ mod tests {
                 kind: ParseErrorKind::Refused,
             })),
             "a refusal is the source's failure, not the worker's"
+        );
+    }
+
+    #[test]
+    fn each_response_is_followed_by_a_marker_on_stderr() {
+        let input = format!(
+            "{}{}",
+            request(1, "f 1\n", &LangOptions::default()),
+            request(2, "!\n", &LangOptions::default())
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        serve(&reg(), &mut input.as_bytes(), &mut out, &mut err).unwrap();
+        assert_eq!(err, vec![RESPONSE_MARKER, RESPONSE_MARKER]);
+    }
+
+    #[test]
+    fn a_name_over_64_bytes_is_not_interned() {
+        assert!(intern(&"k".repeat(64)).is_ok());
+        assert_eq!(
+            intern(&"k".repeat(65)),
+            Err("a name longer than 64 bytes".to_string())
         );
     }
 
