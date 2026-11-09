@@ -561,3 +561,17 @@ fn an_unreadable_subdirectory_is_reported_and_its_siblings_are_scored() {
     assert!(stdout.contains("aFn") && stdout.contains("cFn"), "siblings scored:\n{stdout}");
     assert!(stderr.contains("./b: "), "the problem names b:\n{stderr}");
 }
+
+#[test]
+fn config_is_found_from_the_scanned_path_not_the_working_directory() {
+    let root = temp_dir("config-from-path");
+    let proj = root.join("proj");
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(proj.join("cmplx.toml"), "max = 1\n").unwrap();
+    std::fs::write(proj.join("src/a.js"), "function pick(a) { return a ? 1 : 2; }\n").unwrap();
+
+    let (_, stderr, code) = cmplx_in(&elsewhere, &[proj.join("src").to_str().unwrap()]);
+    assert_eq!(code, 1, "pick scores 2, over /proj/cmplx.toml's max of 1; stderr:\n{stderr}");
+}

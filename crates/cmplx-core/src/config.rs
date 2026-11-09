@@ -206,19 +206,24 @@ impl FileConfig {
         start: &Path,
         reg: &Registry,
     ) -> Result<Option<(PathBuf, FileConfig)>, ConfigError> {
+        let Some(path) = FileConfig::locate(start, reg) else {
+            return Ok(None);
+        };
+        let cfg = FileConfig::load(&path, reg)?;
+        Ok(Some((path, cfg)))
+    }
+
+    /// The file [`Self::discover`] would load from `start`, without reading it.
+    /// The walk is bounded by the number of `start`'s ancestors.
+    pub fn locate(start: &Path, reg: &Registry) -> Option<PathBuf> {
         let legacy_enabled = reg.by_id(LEGACY_RUST_FILE.1).is_some();
-        for dir in start.ancestors() {
-            let found = [FILE_NAME]
+        start.ancestors().find_map(|dir| {
+            [FILE_NAME]
                 .into_iter()
                 .chain(legacy_enabled.then_some(LEGACY_RUST_FILE.0))
                 .map(|name| dir.join(name))
-                .find(|path| path.is_file());
-            if let Some(path) = found {
-                let cfg = FileConfig::load(&path, reg)?;
-                return Ok(Some((path, cfg)));
-            }
-        }
-        Ok(None)
+                .find(|path| path.is_file())
+        })
     }
 
     /// Build a config from LSP `initializationOptions`: the `cmplx.toml` shape,

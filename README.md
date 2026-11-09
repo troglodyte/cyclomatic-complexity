@@ -211,9 +211,14 @@ short-circuiting), `?` by default, and the `try` block expression.
 
 ## Configuration
 
-`cmplx.toml`, found by walking up from the working directory (or from the
-workspace root, under `--lsp`). Layering, lowest to highest: built-in defaults,
-`cmplx.toml`, editor `initializationOptions`, command-line flags.
+`cmplx.toml`, found by walking up from the path being scanned: from a
+directory argument itself, or from the directory holding a file argument.
+Stdin, and a run with no path, start from the working directory; `--lsp`
+starts from the workspace root. With several paths, the file found for the
+first path applies to all of them, and if a later path would have found a
+different file (or none) one warning on stderr says so. Layering, lowest to
+highest: built-in defaults, `cmplx.toml`, editor `initializationOptions`,
+command-line flags.
 
 ```toml
 max = 15          # CLI --max default

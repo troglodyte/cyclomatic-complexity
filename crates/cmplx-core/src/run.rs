@@ -110,20 +110,55 @@ fn apply(cli: &Cli, file: FileConfig) -> FileConfig {
     cli.flags.clone().or(file)
 }
 
-/// Find a `cmplx.toml` (or `rustcx.toml`) by walking up from `start`, and layer
-/// it under the flags. An unreadable or unparseable file is an error, not a
-/// shrug: a typo'd key that silently does nothing is the failure this guards
-/// against. Keys an alias had to ignore come back as warnings to print.
-fn resolve(cli: &Cli, start: &Path, reg: &Registry) -> Result<(FileConfig, Vec<String>), String> {
-    let (file, warnings) = match FileConfig::discover(start, reg) {
+/// Find a `cmplx.toml` (or `rustcx.toml`) by walking up from the first path
+/// argument (see [`config_start`]), and layer it under the flags. An
+/// unreadable or unparseable file is an error, not a shrug: a typo'd key that
+/// silently does nothing is the failure this guards against. Keys an alias had
+/// to ignore come back as warnings to print, and so does the first later path
+/// that would have found a different file (its file is located, never read).
+fn resolve(cli: &Cli, cwd: &Path, reg: &Registry) -> Result<(FileConfig, Vec<String>), String> {
+    let mut paths = cli.paths.iter().filter(|_| !cli.stdin);
+    let first = paths.next();
+    let start = first.map_or_else(|| cwd.to_path_buf(), |path| config_start(cwd, path));
+    let (found, file, mut warnings) = match FileConfig::discover(&start, reg) {
         Ok(Some((path, file))) => {
             let warnings = file.ignored_warnings(&path);
-            (file, warnings)
+            (Some(path), file, warnings)
         }
-        Ok(None) => (FileConfig::default(), Vec::new()),
+        Ok(None) => (None, FileConfig::default(), Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
+    let differing = paths.find_map(|path| {
+        let other = FileConfig::locate(&config_start(cwd, path), reg);
+        (other != found).then_some((path, other))
+    });
+    if let Some((path, other)) = differing {
+        warnings.push(format!(
+            "{}: would use {}, but every path uses {}, found from the first path",
+            path.display(),
+            config_label(other.as_deref()),
+            config_label(found.as_deref())
+        ));
+    }
     Ok((apply(cli, file), warnings))
+}
+
+/// Where config discovery starts for a path argument: the directory itself,
+/// or the directory holding a file (or a path that does not exist).
+fn config_start(cwd: &Path, path: &Path) -> PathBuf {
+    let path = cwd.join(path);
+    if path.is_dir() {
+        return path;
+    }
+    match path.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => path,
+    }
+}
+
+/// A found config file's path, or `no config file`.
+fn config_label(path: Option<&Path>) -> String {
+    path.map_or_else(|| "no config file".to_string(), |p| p.display().to_string())
 }
 
 /// What scores a source: the resolved settings, and the supervisor whose
@@ -598,6 +633,82 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.max, Some(7));
         assert_eq!(config.options_for(&RUST).get("tests"), Some(false));
+    }
+
+    /// `root/proj/cmplx.toml` (max 1) over `root/proj/src/a.rs`, and an empty
+    /// `root/elsewhere` to run from.
+    fn project(tag: &str) -> (PathBuf, PathBuf) {
+        let root = temp_dir(tag);
+        fs::create_dir_all(root.join("proj/src")).unwrap();
+        fs::create_dir_all(root.join("elsewhere")).unwrap();
+        fs::write(root.join("proj/cmplx.toml"), "max = 1\n").unwrap();
+        fs::write(root.join("proj/src/a.rs"), "f 2\n").unwrap();
+        (root.join("proj"), root.join("elsewhere"))
+    }
+
+    fn path_arg(path: &Path) -> String {
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn config_is_found_from_a_directory_argument_not_the_working_directory() {
+        let reg = both();
+        let (proj, elsewhere) = project("from-dir");
+        let cli = parse(&reg, &[&path_arg(&proj.join("src"))]);
+        let (config, warnings) = resolve(&cli, &elsewhere, &reg).unwrap();
+        assert_eq!(config.max, Some(1));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn config_is_found_from_a_file_arguments_directory() {
+        let reg = both();
+        let (proj, elsewhere) = project("from-file");
+        let cli = parse(&reg, &[&path_arg(&proj.join("src/a.rs"))]);
+        assert_eq!(resolve(&cli, &elsewhere, &reg).unwrap().0.max, Some(1));
+    }
+
+    #[test]
+    fn a_relative_path_argument_is_resolved_against_the_working_directory() {
+        let reg = both();
+        let (proj, _) = project("relative");
+        let cli = parse(&reg, &["src"]);
+        assert_eq!(resolve(&cli, &proj, &reg).unwrap().0.max, Some(1));
+    }
+
+    #[test]
+    fn stdin_finds_config_from_the_working_directory() {
+        let reg = both();
+        let (proj, elsewhere) = project("stdin");
+        let cli = parse(&reg, &["--rust", "-"]);
+        assert_eq!(resolve(&cli, &proj.join("src"), &reg).unwrap().0.max, Some(1));
+        assert_eq!(resolve(&cli, &elsewhere, &reg).unwrap().0.max, None);
+    }
+
+    #[test]
+    fn several_paths_use_the_first_paths_config_and_warn_once_about_the_others() {
+        let reg = both();
+        let (proj, elsewhere) = project("several");
+        let other = elsewhere.join("other");
+        fs::create_dir_all(&other).unwrap();
+        // Broken, but only located, never read: the first path's file wins.
+        fs::write(other.join("cmplx.toml"), "treshold = 3\n").unwrap();
+        let cli = parse(
+            &reg,
+            &[&path_arg(&proj.join("src")), &path_arg(&other), &path_arg(&proj), &path_arg(&elsewhere)],
+        );
+        let (config, warnings) = resolve(&cli, &elsewhere, &reg).unwrap();
+        assert_eq!(config.max, Some(1));
+        assert_eq!(
+            warnings,
+            [format!(
+                "{}: would use {}, but every path uses {}, found from the first path",
+                other.display(),
+                other.join("cmplx.toml").display(),
+                proj.join("cmplx.toml").display()
+            )],
+            "one warning, for the first path that differs"
+        );
     }
 
     #[test]
