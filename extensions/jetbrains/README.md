@@ -55,7 +55,7 @@ the server re-reads it when its modification time changes.
 
 ## Check it works
 
-Open `fixtures/patterns.rs` from the repository root with the threshold set to
+Open `crates/cmplx-rust/fixtures/patterns.rs` from the repository root with the threshold set to
 8. `describe` on line 16 scores 8, so a working setup shows a warning there and
 explains the score on hover.
 

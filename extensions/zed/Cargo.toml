@@ -1,5 +1,5 @@
 [package]
-name = "rustcx-extension"
+name = "cmplx-extension"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,3 +9,6 @@ crate-type = ["cdylib"]
 [dependencies]
 zed_extension_api = "0.7.0"
 serde_json = "1.0"
+
+# Not a member of the repo workspace: Zed builds this to wasm on its own.
+[workspace]

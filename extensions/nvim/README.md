@@ -75,7 +75,7 @@ apply. Attaches to JavaScript, TypeScript (and their React variants) and Rust bu
 
 ## Check it works
 
-Open `fixtures/patterns.rs` from the repository root with a threshold of 8. It
+Open `crates/cmplx-rust/fixtures/patterns.rs` from the repository root with a threshold of 8. It
 holds `describe` at complexity 8, so a working setup shows a warning on line 16
 and answers `K` there with the decision points behind the score.
 

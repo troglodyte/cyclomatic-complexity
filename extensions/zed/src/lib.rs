@@ -1,12 +1,12 @@
 use zed_extension_api as zed;
 
-struct RustcxExtension;
+struct CmplxExtension;
 
-/// `~/.cargo/bin/rustcx`, built from the worktree shell's `HOME`.
+/// `~/.cargo/bin/cmplx`, built from the worktree shell's `HOME`.
 ///
-/// This fallback is what jscx's Zed extension lacks. `which` searches the
-/// worktree's `PATH`, which a desktop-launched Zed may not have inherited from
-/// a login shell, leaving a cargo-installed binary invisible.
+/// `which` searches the worktree's `PATH`, which a desktop-launched Zed may
+/// not have inherited from a login shell, leaving a cargo-installed binary
+/// invisible.
 ///
 /// The path is returned unchecked: the extension runs in a WASI sandbox with no
 /// access to arbitrary filesystem paths, so there is no way to stat it from
@@ -21,10 +21,10 @@ fn cargo_bin(worktree: &zed::Worktree) -> Option<String> {
     if home.is_empty() {
         return None;
     }
-    Some(format!("{home}/.cargo/bin/rustcx"))
+    Some(format!("{home}/.cargo/bin/cmplx"))
 }
 
-impl zed::Extension for RustcxExtension {
+impl zed::Extension for CmplxExtension {
     fn new() -> Self {
         Self
     }
@@ -35,11 +35,11 @@ impl zed::Extension for RustcxExtension {
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
         let command = worktree
-            .which("rustcx")
+            .which("cmplx")
             .or_else(|| cargo_bin(worktree))
             .ok_or_else(|| {
-                "rustcx was not found on PATH or in ~/.cargo/bin. Install it with \
-                 'cargo install --path .' in the rustcx directory."
+                "cmplx was not found on PATH or in ~/.cargo/bin. Install it with \
+                 'cargo install --path crates/cmplx' in this repository's crates/cmplx directory."
                     .to_string()
             })?;
 
@@ -53,14 +53,14 @@ impl zed::Extension for RustcxExtension {
     /// The threshold, only if the user set one.
     ///
     /// Returning `None` rather than a default is load-bearing: the server
-    /// resolves `initializationOptions` over `rustcx.toml`, so sending a
+    /// resolves `initializationOptions` over `cmplx.toml`, so sending a
     /// default here would override that file in every project.
     fn language_server_initialization_options(
         &mut self,
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<Option<serde_json::Value>> {
-        let threshold = zed::settings::LspSettings::for_worktree("rustcx", worktree)
+        let threshold = zed::settings::LspSettings::for_worktree("cmplx", worktree)
             .ok()
             .and_then(|s| s.settings)
             .and_then(|s| s.get("threshold").and_then(|v| v.as_u64()))
@@ -70,4 +70,4 @@ impl zed::Extension for RustcxExtension {
     }
 }
 
-zed::register_extension!(RustcxExtension);
+zed::register_extension!(CmplxExtension);
