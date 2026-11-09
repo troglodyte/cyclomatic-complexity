@@ -1,5 +1,5 @@
 //! The new binaries against the output the pre-merge jscx and rustcx recorded
-//! in `tests/golden/` (see `tools/capture-goldens.sh` for the exact commands).
+//! in `tests/golden/`; legacy paths are remapped to where the fixtures live now.
 //!
 //! Compared by meaning, not bytes (spec, "Compatibility"): JSON must contain
 //! every old field with the same value; tables are compared as a multiset of
@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{bin, workspace_root};
+use common::{bin, remap_golden_paths, workspace_root};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -99,7 +99,7 @@ struct Run {
     code: i32,
 }
 
-/// Run `tool` from the workspace root, as the capture script did.
+/// Run `tool` from the workspace root, from where the goldens were captured.
 fn run(tool: &str, args: &[&str], stdin_file: Option<&str>) -> Run {
     let mut command = Command::new(bin(tool));
     command
@@ -138,7 +138,7 @@ fn golden(tool: &str, case: &str) -> Golden {
             .unwrap_or_else(|e| panic!("golden {tool}/{case}.{ext}: {e}"))
     };
     Golden {
-        stdout: read("stdout"),
+        stdout: remap_golden_paths(&read("stdout")),
         exit: read("exit").trim().parse().expect("golden exit code"),
     }
 }
@@ -180,7 +180,7 @@ const RUST_FIXTURES: [&str; 4] = ["nesting", "patterns", "simple", "syntax"];
 #[test]
 fn rustcx_json_matches_the_goldens() {
     for name in RUST_FIXTURES {
-        let path = format!("legacy/rustcx/fixtures/{name}.rs");
+        let path = format!("crates/cmplx-rust/fixtures/{name}.rs");
         assert_json_matches("rustcx", &format!("json-{name}"), &["--json", &path], None);
     }
 }
@@ -188,19 +188,19 @@ fn rustcx_json_matches_the_goldens() {
 #[test]
 fn rustcx_explain_rows_match_the_goldens() {
     for name in RUST_FIXTURES {
-        let path = format!("legacy/rustcx/fixtures/{name}.rs");
+        let path = format!("crates/cmplx-rust/fixtures/{name}.rs");
         assert_rows_match("rustcx", &format!("explain-{name}"), &["--explain", &path]);
     }
 }
 
 #[test]
 fn rustcx_top_rows_match_the_golden() {
-    assert_rows_match("rustcx", "top", &["--top", "5", "legacy/rustcx/fixtures"]);
+    assert_rows_match("rustcx", "top", &["--top", "5", "crates/cmplx-rust/fixtures"]);
 }
 
 #[test]
 fn rustcx_max_rows_and_exit_match_the_golden() {
-    assert_rows_match("rustcx", "max", &["--max", "3", "legacy/rustcx/fixtures"]);
+    assert_rows_match("rustcx", "max", &["--max", "3", "crates/cmplx-rust/fixtures"]);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn rustcx_missing_path_exits_two_naming_it() {
 #[test]
 fn jscx_json_matches_the_goldens() {
     for name in ["test.js", "test.ts"] {
-        let path = format!("legacy/jscx/{name}");
+        let path = format!("crates/cmplx-js/fixtures/{name}");
         assert_json_matches("jscx", &format!("json-{name}"), &["--json", &path], None);
     }
 }
@@ -219,19 +219,19 @@ fn jscx_json_matches_the_goldens() {
 #[test]
 fn jscx_explain_rows_match_the_goldens() {
     for name in ["test.js", "test.ts"] {
-        let path = format!("legacy/jscx/{name}");
+        let path = format!("crates/cmplx-js/fixtures/{name}");
         assert_rows_match("jscx", &format!("explain-{name}"), &["--explain", &path]);
     }
 }
 
 #[test]
 fn jscx_top_rows_match_the_golden() {
-    assert_rows_match("jscx", "top", &["--top", "5", "legacy/jscx"]);
+    assert_rows_match("jscx", "top", &["--top", "5", "crates/cmplx-js/fixtures"]);
 }
 
 #[test]
 fn jscx_max_rows_and_exit_match_the_golden() {
-    assert_rows_match("jscx", "max", &["--max", "3", "legacy/jscx"]);
+    assert_rows_match("jscx", "max", &["--max", "3", "crates/cmplx-js/fixtures"]);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn jscx_stdin_json_matches_the_golden() {
         "jscx",
         "stdin-ts",
         &["--json", "--ext", "ts", "-"],
-        Some("legacy/jscx/test.ts"),
+        Some("crates/cmplx-js/fixtures/test.ts"),
     );
 }
 

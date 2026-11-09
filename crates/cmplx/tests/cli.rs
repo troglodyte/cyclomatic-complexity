@@ -7,7 +7,7 @@ use std::process::Command;
 /// Where the rustcx fixtures live; the relative `fixtures/...` paths below
 /// resolve from here, as they did when this suite sat beside the tool.
 fn rustcx_home() -> PathBuf {
-    workspace_root().join("legacy/rustcx")
+    workspace_root().join("crates/cmplx-rust")
 }
 
 fn rustcx(args: &[&str]) -> (String, String, i32) {

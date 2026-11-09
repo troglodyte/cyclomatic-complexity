@@ -41,3 +41,33 @@ pub fn bin(name: &str) -> PathBuf {
     });
     target_dir().join("debug").join(name)
 }
+
+/// Rewrite the paths inside a golden's text to where the fixtures live now.
+///
+/// The goldens were captured with the fixtures under `legacy/`; the files are
+/// byte-identical copies today under `crates/cmplx-{rust,js}/fixtures/`. The
+/// golden files themselves stay untouched. Works on JSON, table rows and
+/// headers alike, since it only swaps path prefixes.
+pub fn remap_golden_paths(text: &str) -> String {
+    text.replace("legacy/rustcx/fixtures/", "crates/cmplx-rust/fixtures/")
+        .replace("legacy/jscx/", "crates/cmplx-js/fixtures/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_golden_paths;
+
+    #[test]
+    fn remap_golden_paths_rewrites_json_and_table_prefixes() {
+        let text = "{\"file\":\"legacy/rustcx/fixtures/a.rs\"}\nlegacy/jscx/test.ts:71  fn\nlegacy/jscx/test.js\n";
+        assert_eq!(
+            remap_golden_paths(text),
+            "{\"file\":\"crates/cmplx-rust/fixtures/a.rs\"}\ncrates/cmplx-js/fixtures/test.ts:71  fn\ncrates/cmplx-js/fixtures/test.js\n"
+        );
+    }
+
+    #[test]
+    fn remap_golden_paths_leaves_other_paths_alone() {
+        assert_eq!(remap_golden_paths("src/legacy.rs x.rs"), "src/legacy.rs x.rs");
+    }
+}

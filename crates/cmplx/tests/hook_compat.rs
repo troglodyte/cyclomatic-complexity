@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{bin, workspace_root};
+use common::{bin, remap_golden_paths, workspace_root};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -44,7 +44,7 @@ fn new_json(tool: &str, path: &str) -> String {
 
 fn golden_json(tool: &str, case: &str) -> String {
     let path = workspace_root().join(format!("tests/golden/{tool}/{case}.stdout"));
-    fs::read_to_string(path).expect("golden output")
+    remap_golden_paths(&fs::read_to_string(path).expect("golden output"))
 }
 
 fn assert_hook_sees_the_same(tool: &str, case: &str, path: &str) {
@@ -56,10 +56,10 @@ fn assert_hook_sees_the_same(tool: &str, case: &str, path: &str) {
 
 #[test]
 fn the_hook_filter_reads_jscx_json_as_before() {
-    assert_hook_sees_the_same("jscx", "json-test.ts", "legacy/jscx/test.ts");
+    assert_hook_sees_the_same("jscx", "json-test.ts", "crates/cmplx-js/fixtures/test.ts");
 }
 
 #[test]
 fn the_hook_filter_reads_rustcx_json_as_before() {
-    assert_hook_sees_the_same("rustcx", "json-patterns", "legacy/rustcx/fixtures/patterns.rs");
+    assert_hook_sees_the_same("rustcx", "json-patterns", "crates/cmplx-rust/fixtures/patterns.rs");
 }
