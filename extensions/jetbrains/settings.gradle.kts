@@ -1,4 +1,4 @@
-rootProject.name = "rustcx-intellij"
+rootProject.name = "cmplx-intellij"
 
 plugins {
     // Lets Gradle provision the JDK 21 toolchain the IntelliJ Platform needs,

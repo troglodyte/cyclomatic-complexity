@@ -1,13 +1,13 @@
-package dev.rustcx.intellij
+package dev.cmplx.intellij
 
 import com.intellij.execution.configurations.PathEnvironmentVariableUtil
 import java.io.File
 import java.nio.file.Path
 
-/** Locates the `rustcx` executable. */
-object RustcxBinary {
+/** Locates the `cmplx` executable. */
+object CmplxBinary {
 
-    const val EXECUTABLE: String = "rustcx"
+    const val EXECUTABLE: String = "cmplx"
 
     /**
      * Resolution order: the configured path, then `PATH`, then Cargo's bin
@@ -27,7 +27,7 @@ object RustcxBinary {
      */
     fun resolve(
         configured: String,
-        // findExecutableInPathOnAnyOS, rather than findInPath, so Windows finds rustcx.exe.
+        // findExecutableInPathOnAnyOS, rather than findInPath, so Windows finds cmplx.exe.
         pathLookup: (String) -> File? = { PathEnvironmentVariableUtil.findExecutableInPathOnAnyOS(it) },
         home: Path = Path.of(System.getProperty("user.home")),
     ): String? {

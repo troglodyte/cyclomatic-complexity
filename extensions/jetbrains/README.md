@@ -1,15 +1,15 @@
-# rustcx JetBrains Plugin
+# cmplx JetBrains Plugin
 
-Cyclomatic complexity diagnostics and hover for Rust in IntelliJ IDEA Ultimate
+Cyclomatic complexity diagnostics and hover for JavaScript, TypeScript and Rust in IntelliJ IDEA Ultimate
 and the other paid JetBrains IDEs.
 
-The plugin is a thin LSP client. It resolves the `rustcx` binary, runs
-`rustcx --lsp`, and passes the threshold as an initialization option if one is
-set — all scoring lives in the Rust server, shared with the other extensions.
+The plugin is a thin LSP client. It resolves the `cmplx` binary, runs
+`cmplx --lsp`, and passes the threshold as an initialization option if one is
+set — all scoring lives in the cmplx server, shared with the other extensions.
 
 ## Requirements
 
-- The `rustcx` binary: `cargo install --path ../..`
+- The `cmplx` binary: `cargo install --path crates/cmplx./..`
 - A paid JetBrains IDE, 2026.2 or newer. The IntelliJ LSP API does not exist in
   IDEA Community or Android Studio. See `pluginSinceBuild` in
   `gradle.properties` for what it would take to support older IDEs.
@@ -26,7 +26,7 @@ Install the resulting zip — not either jar inside it — with
 *Settings | Plugins | ⚙ | Install Plugin from Disk*, then restart the IDE:
 
 ```text
-build/distributions/rustcx-intellij-0.1.0.zip
+build/distributions/cmplx-intellij-0.1.0.zip
 ```
 
 That path is relative to this directory, and the version in it comes from
@@ -42,15 +42,15 @@ Other useful tasks:
 
 ## Configuration
 
-*Settings | Tools | rustcx*
+*Settings | Tools | cmplx*
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Complexity threshold | 0 | Warning at or above this score, error at or above twice it. `0` hands the decision to `rustcx.toml`. |
-| rustcx binary | blank | Blank resolves from `PATH`, then `~/.cargo/bin/rustcx` |
+| Complexity threshold | 0 | Warning at or above this score, error at or above twice it. `0` hands the decision to `cmplx.toml`. |
+| cmplx binary | blank | Blank resolves from `PATH`, then `~/.cargo/bin/cmplx` |
 
 Changing either setting restarts the language server, because the server reads
-its options only during `initialize`. Editing `rustcx.toml` needs no restart —
+its options only during `initialize`. Editing `cmplx.toml` needs no restart —
 the server re-reads it when its modification time changes.
 
 ## Check it works
@@ -61,16 +61,16 @@ explains the score on hover.
 
 If diagnostics appear but hover does not, the platform client is not issuing
 hover requests despite the server advertising `hoverProvider`. The fix belongs
-in `RustcxLspClientDescriptor`, which currently declares no explicit feature
+in `CmplxLspClientDescriptor`, which currently declares no explicit feature
 support.
 
 ## Layout
 
 | File | Role |
 | --- | --- |
-| `RustcxLspIntegrationProvider.kt` | Decides which files start the server |
-| `RustcxLspClientDescriptor.kt` | Builds the command line and initialization options |
-| `RustcxBinary.kt` | Locates the executable |
-| `RustcxSettings.kt` | Persisted threshold and binary path |
-| `RustcxConfigurable.kt` | The settings panel |
-| `RustcxNotifications.kt` | The missing-binary balloon |
+| `CmplxLspIntegrationProvider.kt` | Decides which files start the server |
+| `CmplxLspClientDescriptor.kt` | Builds the command line and initialization options |
+| `CmplxBinary.kt` | Locates the executable |
+| `CmplxSettings.kt` | Persisted threshold and binary path |
+| `CmplxConfigurable.kt` | The settings panel |
+| `CmplxNotifications.kt` | The missing-binary balloon |

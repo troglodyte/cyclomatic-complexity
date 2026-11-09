@@ -1,4 +1,4 @@
-package dev.rustcx.intellij
+package dev.cmplx.intellij
 
 import java.io.File
 import java.nio.file.Files
@@ -13,9 +13,9 @@ import kotlin.test.assertNull
  * these tests need no IDE fixture — only real files, because `canExecute` is the
  * one thing that cannot be faked.
  */
-class RustcxBinaryTest {
+class CmplxBinaryTest {
 
-    private val temp: Path = Files.createTempDirectory("rustcx-binary-test")
+    private val temp: Path = Files.createTempDirectory("cmplx-binary-test")
 
     @AfterTest
     fun cleanUp() {
@@ -33,20 +33,20 @@ class RustcxBinaryTest {
 
     @Test
     fun `a configured path wins`() {
-        val configured = executable("custom/rustcx")
+        val configured = executable("custom/cmplx")
         assertEquals(
             configured,
-            RustcxBinary.resolve(configured, pathLookup = { null }, home = temp),
+            CmplxBinary.resolve(configured, pathLookup = { null }, home = temp),
         )
     }
 
     @Test
     fun `a configured path that is not executable resolves to null`() {
         // Not a fallthrough: a typo must surface as an error, not as PATH's copy.
-        val onPath = executable("bin/rustcx")
+        val onPath = executable("bin/cmplx")
         assertNull(
-            RustcxBinary.resolve(
-                temp.resolve("nope/rustcx").toString(),
+            CmplxBinary.resolve(
+                temp.resolve("nope/cmplx").toString(),
                 pathLookup = { File(onPath) },
                 home = temp,
             )
@@ -55,34 +55,34 @@ class RustcxBinaryTest {
 
     @Test
     fun `PATH is used when nothing is configured`() {
-        val onPath = executable("bin/rustcx")
+        val onPath = executable("bin/cmplx")
         assertEquals(
             onPath,
-            RustcxBinary.resolve("", pathLookup = { File(onPath) }, home = temp),
+            CmplxBinary.resolve("", pathLookup = { File(onPath) }, home = temp),
         )
     }
 
     @Test
     fun `blank and whitespace configured paths are treated as unset`() {
-        val onPath = executable("bin/rustcx")
+        val onPath = executable("bin/cmplx")
         assertEquals(
             onPath,
-            RustcxBinary.resolve("   ", pathLookup = { File(onPath) }, home = temp),
+            CmplxBinary.resolve("   ", pathLookup = { File(onPath) }, home = temp),
         )
     }
 
     @Test
     fun `the cargo bin is the fallback when PATH has no hit`() {
-        val cargo = executable(".cargo/bin/rustcx")
+        val cargo = executable(".cargo/bin/cmplx")
         assertEquals(
             cargo,
-            RustcxBinary.resolve("", pathLookup = { null }, home = temp),
+            CmplxBinary.resolve("", pathLookup = { null }, home = temp),
         )
     }
 
     @Test
     fun `a non-executable PATH hit falls through to the cargo bin`() {
-        val cargo = executable(".cargo/bin/rustcx")
+        val cargo = executable(".cargo/bin/cmplx")
         val plainFile = temp.resolve("bin/plain").toFile()
         plainFile.parentFile.mkdirs()
         plainFile.writeText("not executable")
@@ -90,17 +90,17 @@ class RustcxBinaryTest {
 
         assertEquals(
             cargo,
-            RustcxBinary.resolve("", pathLookup = { plainFile }, home = temp),
+            CmplxBinary.resolve("", pathLookup = { plainFile }, home = temp),
         )
     }
 
     @Test
     fun `nothing anywhere resolves to null`() {
-        assertNull(RustcxBinary.resolve("", pathLookup = { null }, home = temp))
+        assertNull(CmplxBinary.resolve("", pathLookup = { null }, home = temp))
     }
 
     @Test
     fun `the executable name is the plain binary name`() {
-        assertEquals("rustcx", RustcxBinary.EXECUTABLE)
+        assertEquals("cmplx", CmplxBinary.EXECUTABLE)
     }
 }
