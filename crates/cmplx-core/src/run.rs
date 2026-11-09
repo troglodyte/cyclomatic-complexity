@@ -535,6 +535,26 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_past_the_depth_cap_warns_the_rest_is_scored_and_exits_two() {
+        let dir = temp_dir("too-deep");
+        let deepest = (0..=crate::walk::MAX_DIR_DEPTH).fold(dir.clone(), |d, _| d.join("d"));
+        fs::create_dir_all(&deepest).unwrap();
+        file(&deepest, "deep.rs", "hidden 1\n");
+        file(&dir, "top.rs", "shown 1\n");
+        let out = execute_with(&both(), &[&dir.display().to_string()], "");
+        assert_eq!(out.code, 2);
+        assert_eq!(
+            out.stderr,
+            format!(
+                "cmplx: {}: directory nesting deeper than 64; not scanned\n",
+                deepest.display()
+            )
+        );
+        assert!(out.stdout.contains("shown"), "got:\n{}", out.stdout);
+        assert!(!out.stdout.contains("hidden"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
     fn a_named_file_no_language_claims_exits_two() {
         let dir = temp_dir("unclaimed");
         let path = file(&dir, "notes.txt", "f 1\n");

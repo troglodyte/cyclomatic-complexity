@@ -31,6 +31,10 @@ pub const SKIP_DIRS: &[&str] = &[
     "venv",
 ];
 
+/// Deepest directory level below a walked root that is entered; the root is
+/// level 0. Deeper directories are reported and skipped.
+pub const MAX_DIR_DEPTH: usize = 64;
+
 /// A file to score and the language that scores it.
 #[derive(Clone)]
 pub struct Source {
@@ -98,7 +102,7 @@ pub fn expand(paths: &[PathBuf], scope: &Scope) -> Expanded {
             }
         };
         if meta.is_dir() {
-            if let Err(e) = collect(path, scope, &mut out.sources) {
+            if let Err(e) = collect(path, scope, &mut out) {
                 out.problems.push(format!("{}: {e}", path.display()));
             }
             continue;
@@ -118,32 +122,55 @@ pub fn expand(paths: &[PathBuf], scope: &Scope) -> Expanded {
     out
 }
 
-/// Recursively collect claimed files under `root` in sorted order, skipping
-/// [`SKIP_DIRS`]. Symlinks met while walking are not followed, as in jscx: a
-/// link to a parent would count files twice, and two such links never end.
-fn collect(root: &Path, scope: &Scope, out: &mut Vec<Source>) -> io::Result<()> {
-    let mut entries: Vec<(PathBuf, fs::FileType)> = fs::read_dir(root)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    // `DirEntry::file_type` does not follow links, so a symlink is neither.
-    for (path, file_type) in entries {
+/// Collect claimed files under `root` in sorted order, skipping [`SKIP_DIRS`].
+/// Symlinks met while walking are not followed, as in jscx: a link to a parent
+/// would count files twice, and two such links never end.
+///
+/// The walk keeps an explicit stack of directory listings, one per level, so
+/// its depth is bounded by [`MAX_DIR_DEPTH`] rather than by the call stack. A
+/// directory below that level is reported in `out.problems` and not entered.
+fn collect(root: &Path, scope: &Scope, out: &mut Expanded) -> io::Result<()> {
+    let mut stack = vec![sorted_entries(root)?];
+    while let Some(level) = stack.last_mut() {
+        let Some((path, file_type)) = level.next() else {
+            stack.pop();
+            continue;
+        };
+        // `DirEntry::file_type` does not follow links, so a symlink is neither.
         if file_type.is_dir() {
             let skip = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| SKIP_DIRS.contains(&n));
-            if !skip {
-                collect(&path, scope, out)?;
+            if skip {
+                continue;
             }
+            // `stack.len()` is the level of `path`: the root's entries are level 1.
+            if stack.len() > MAX_DIR_DEPTH {
+                out.problems.push(format!(
+                    "{}: directory nesting deeper than {MAX_DIR_DEPTH}; not scanned",
+                    path.display()
+                ));
+                continue;
+            }
+            stack.push(sorted_entries(&path)?);
         } else if file_type.is_file() {
             if let Some(lang) = scope.walked(&path) {
-                out.push(Source { path, lang });
+                out.sources.push(Source { path, lang });
             }
         }
     }
     Ok(())
+}
+
+/// The entries of one directory, sorted by path, with their unfollowed types.
+fn sorted_entries(dir: &Path) -> io::Result<std::vec::IntoIter<(PathBuf, fs::FileType)>> {
+    let mut entries: Vec<(PathBuf, fs::FileType)> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries.into_iter())
 }
 
 #[cfg(test)]
@@ -475,6 +502,70 @@ mod tests {
             found(&root, &named),
             [("links/b.rs".into(), "rust"), ("dir-link/a.rs".into(), "rust")]
         );
+    }
+
+    /// `levels` directories nested below `root`, with `a.rs` in the deepest.
+    fn nest(root: &Path, levels: usize) -> PathBuf {
+        let deepest = (0..levels).fold(root.to_path_buf(), |dir, _| dir.join("d"));
+        touch(&deepest, "a.rs");
+        deepest
+    }
+
+    #[test]
+    fn a_tree_nested_exactly_to_the_depth_cap_is_scanned() {
+        let root = temp_dir("depth-cap");
+        nest(&root, MAX_DIR_DEPTH);
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(out.sources.len(), 1);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_directory_past_the_depth_cap_is_reported_once_and_not_entered() {
+        let root = temp_dir("depth-over");
+        let deepest = nest(&root, MAX_DIR_DEPTH + 1);
+        touch(&root, "z.rs");
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(found(&root, &out), [("z.rs".into(), "rust")], "the rest is still walked");
+        assert_eq!(
+            out.problems,
+            [format!(
+                "{}: directory nesting deeper than 64; not scanned",
+                deepest.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_walk_visits_files_and_directories_interleaved_in_sorted_order() {
+        let root = temp_dir("interleaved");
+        for rel in ["a.rs", "b/x.rs", "b/c/y.rs", "b/z.rs", "c.rs"] {
+            touch(&root, rel);
+        }
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        let names: Vec<String> = found(&root, &out).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(names, ["a.rs", "b/c/y.rs", "b/x.rs", "b/z.rs", "c.rs"]);
     }
 
     #[test]
