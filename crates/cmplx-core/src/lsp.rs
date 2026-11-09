@@ -1386,7 +1386,7 @@ mod tests {
             while IFS= read -r line; do
                 case "$line" in *CRASH*) echo boom >&2; exit 3;; esac
                 id=${line#\{\"id\":}; id=${id%%,*}
-                printf '{"id":%s,"functions":[{"name":"f","kind":{"id":"fn","label":"fn"},"line":1,"complexity":20,"depth":0,"points":[]}]}\n' "$id"
+                printf '{"id":%s,"functions":[{"n":"f","k":"fn","l":1,"c":20}]}\n' "$id"
             done
         "#;
         server_with_worker(script, restarts)

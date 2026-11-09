@@ -42,10 +42,32 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// worker never blocks on a full pipe.
 pub const MAX_WORKER_STDERR: usize = 64 * 1024;
 
-/// Longest response line read. The densest real source measured (one-line
-/// functions full of `&&`/`||`) answers with about 4.7 bytes of JSON per
-/// source byte; 16 leaves more than three times that.
-const MAX_RESPONSE_BYTES: u64 = MAX_FILE_BYTES * 16;
+/// Most response bytes per source byte a worker may send: twice the worst
+/// measured, rounded up. Measured on the release binary with 200 KB samples
+/// of each shape, in the compact worker form (see [`crate::worker`]):
+///
+/// | Source | Bytes of response per source byte |
+/// | --- | --- |
+/// | Rust `fn f(){\|\|\|\|…0;}`, closures nested 2000 deep, repeated | 25.2 |
+/// | JS `x=>x=>…0`, arrows nested to the end of the file | 17.9 |
+/// | Rust `match 0{1\|1\|…=>0,_=>0}`, pattern alternatives | 17.0 |
+/// | Rust `a???…` with `--question`, in groups of 100 | 14.9 |
+/// | Rust `\|\|0;` repeated, closures side by side | 12.0 |
+/// | JS `x=>0;` repeated | 8.8 |
+/// | JS `[()=>0,…]` | 7.3 |
+/// | JS `a\|\|a\|\|…` | 5.7 |
+/// | Rust `fn a(){}` repeated | 3.9 |
+///
+/// Before the compact form, `x=>0;` alone was 21.4 and nested arrows 36.9.
+/// Rust closures nest only about 4000 deep before `syn` overflows, so their
+/// depth never takes more than four digits. A name copied onto many functions
+/// (a long callee name before thousands of callbacks, a long `impl` type
+/// before thousands of methods) grows with the file rather than per byte;
+/// such a file is refused here, as one file, rather than held in memory.
+pub const MAX_RESPONSE_RATIO: u64 = 52;
+
+/// Longest response line read.
+const MAX_RESPONSE_BYTES: u64 = MAX_FILE_BYTES * MAX_RESPONSE_RATIO;
 
 /// How long a worker that closed its output gets to exit before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
@@ -783,7 +805,7 @@ mod tests {
         while IFS= read -r line; do
             case "$line" in *CRASH*) echo "boom" >&2; kill -ABRT $$;; esac
             id=${line#\{\"id\":}; id=${id%%,*}
-            printf '{"id":%s,"functions":[{"name":"f","kind":{"id":"fn","label":"fn"},"line":1,"complexity":2,"depth":0,"points":[{"line":1,"branch":"if"}]}]}\n' "$id"
+            printf '{"id":%s,"functions":[{"n":"f","k":"fn","l":1,"c":2,"p":[{"l":1,"b":"if"}]}]}\n' "$id"
         done
     "#;
 
@@ -1024,11 +1046,6 @@ mod tests {
             CrashReason::GaveUp,
             "the replacement counted as a restart"
         );
-    }
-
-    #[test]
-    fn the_response_cap_is_sixteen_times_the_file_cap() {
-        assert_eq!(MAX_RESPONSE_BYTES, MAX_FILE_BYTES * 16);
     }
 
     #[test]

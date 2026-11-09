@@ -701,7 +701,7 @@ mod tests {
             while IFS= read -r line; do
                 case "$line" in *CRASH*) echo boom >&2; exit 3;; esac
                 id=${line#\{\"id\":}; id=${id%%,*}
-                printf '{"id":%s,"functions":[{"name":"w","kind":{"id":"fn","label":"fn"},"line":1,"complexity":1,"depth":0,"points":[]}]}\n' "$id"
+                printf '{"id":%s,"functions":[{"n":"w","k":"fn","l":1,"c":1}]}\n' "$id"
             done
         "#;
         Supervisor::new(SupervisorConfig {

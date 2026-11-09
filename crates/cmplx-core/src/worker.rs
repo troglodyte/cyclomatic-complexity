@@ -6,7 +6,10 @@
 //! every alias):
 //!
 //! - request: `{"id": n, "lang": "<id>", "path": "<path>", "text": "<source>", "options": {"<key>": bool}}`
-//! - response: `{"id": n, "functions": [...]}`, or
+//! - response: `{"id": n, "functions": [...]}`, each function in a compact
+//!   form only this protocol uses: `{"n": name, "k": kind id, "kl": kind label,
+//!   "l": line, "c": complexity, "d": depth, "p": [{"l": line, "b": branch}]}`,
+//!   where `kl` is left out when it equals `k`, `d` when 0 and `p` when empty; or
 //!   `{"id": n, "error": {"kind": "syntax" | "too_deep" | "invalid", "line": n, "limit": n, "message": "..."}}`
 //!
 //! `invalid` is a request the worker refused (not JSON, an unknown language,
@@ -225,20 +228,30 @@ fn invalid(id: Value, message: &str) -> Value {
     json!({ "id": id, "error": { "kind": "invalid", "line": 0, "message": message } })
 }
 
+/// One function in the worker's compact form: short keys, with the kind label
+/// left out when it equals the id, depth when 0 and points when empty. Only
+/// the worker protocol uses this; `--json` output is built elsewhere.
 fn func_json(f: &Func) -> Value {
-    let points: Vec<Value> = f
-        .points
-        .iter()
-        .map(|p| json!({ "line": p.line, "branch": p.branch }))
-        .collect();
-    json!({
-        "name": f.name,
-        "kind": { "id": f.kind.id, "label": f.kind.label },
-        "line": f.line,
-        "complexity": f.complexity,
-        "depth": f.depth,
-        "points": points,
-    })
+    let mut out = serde_json::Map::new();
+    out.insert("n".into(), json!(f.name));
+    out.insert("k".into(), json!(f.kind.id));
+    if f.kind.label != f.kind.id {
+        out.insert("kl".into(), json!(f.kind.label));
+    }
+    out.insert("l".into(), json!(f.line));
+    out.insert("c".into(), json!(f.complexity));
+    if f.depth != 0 {
+        out.insert("d".into(), json!(f.depth));
+    }
+    if !f.points.is_empty() {
+        let points: Vec<Value> = f
+            .points
+            .iter()
+            .map(|p| json!({ "l": p.line, "b": p.branch }))
+            .collect();
+        out.insert("p".into(), Value::Array(points));
+    }
+    Value::Object(out)
 }
 
 fn error_json(e: &ParseError) -> Value {
@@ -311,34 +324,40 @@ fn decode_error(error: &Value) -> Result<ParseError, String> {
     })
 }
 
+/// Read one function in the form [`func_json`] writes.
 fn decode_func(f: &Value) -> Result<Func, String> {
-    let points = f["points"]
-        .as_array()
-        .ok_or("function has no points")?
-        .iter()
-        .map(|p| {
-            Ok(Point {
-                line: number(&p["line"]).ok_or("point has no line")?,
-                branch: intern(p["branch"].as_str().ok_or("point has no branch")?)?,
+    // A missing `p` is no points; any other non-array is a bad response.
+    let points = match f.get("p") {
+        None => Vec::new(),
+        Some(points) => points
+            .as_array()
+            .ok_or("function points are not a list")?
+            .iter()
+            .map(|p| {
+                Ok(Point {
+                    line: number(&p["l"]).ok_or("point has no line")?,
+                    branch: intern(p["b"].as_str().ok_or("point has no branch")?)?,
+                })
             })
-        })
-        .collect::<Result<_, String>>()?;
+            .collect::<Result<_, String>>()?,
+    };
+    let id = intern(f["k"].as_str().ok_or("function has no kind id")?)?;
+    // A missing `kl` means the label is the id.
+    let label = match f.get("kl") {
+        None => id,
+        Some(label) => intern(label.as_str().ok_or("function kind label is not text")?)?,
+    };
+    // A missing `d` is depth 0.
+    let depth = match f.get("d") {
+        None => 0,
+        Some(depth) => number(depth).ok_or("function depth is not a number")?,
+    };
     Ok(Func {
-        name: f["name"]
-            .as_str()
-            .ok_or("function has no name")?
-            .to_string(),
-        kind: Kind {
-            id: intern(f["kind"]["id"].as_str().ok_or("function has no kind id")?)?,
-            label: intern(
-                f["kind"]["label"]
-                    .as_str()
-                    .ok_or("function has no kind label")?,
-            )?,
-        },
-        line: number(&f["line"]).ok_or("function has no line")?,
-        complexity: number(&f["complexity"]).ok_or("function has no complexity")?,
-        depth: number(&f["depth"]).ok_or("function has no depth")?,
+        name: f["n"].as_str().ok_or("function has no name")?.to_string(),
+        kind: Kind { id, label },
+        line: number(&f["l"]).ok_or("function has no line")?,
+        complexity: number(&f["c"]).ok_or("function has no complexity")?,
+        depth,
         points,
     })
 }
@@ -682,6 +701,39 @@ mod tests {
         let mut out = Vec::new();
         serve(&reg(), &mut empty.as_bytes(), &mut out, &mut io::sink()).unwrap();
         assert_eq!(out, b"{\"id\":5,\"functions\":[]}\n");
+    }
+
+    #[test]
+    fn a_function_is_sent_with_short_keys_and_defaults_left_out() {
+        let plain = Func {
+            name: "f".into(),
+            kind: Kind { id: "fn", label: "fn" },
+            line: 1,
+            complexity: 1,
+            depth: 0,
+            points: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&func_json(&plain)).unwrap(),
+            r#"{"c":1,"k":"fn","l":1,"n":"f"}"#,
+            "no label equal to the id, no zero depth, no empty points"
+        );
+        let full = Func {
+            name: "T::g".into(),
+            kind: Kind { id: "trait_fn", label: "trait fn" },
+            line: 3,
+            complexity: 2,
+            depth: 2,
+            points: vec![Point { line: 4, branch: "if" }],
+        };
+        assert_eq!(
+            func_json(&full),
+            json!({ "n": "T::g", "k": "trait_fn", "kl": "trait fn", "l": 3, "c": 2, "d": 2,
+                    "p": [{ "l": 4, "b": "if" }] })
+        );
+        for f in [plain, full] {
+            assert_eq!(decode_func(&func_json(&f)), Ok(f));
+        }
     }
 
     #[test]
