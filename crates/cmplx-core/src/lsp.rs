@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -81,10 +82,16 @@ struct Server<W: Write> {
 
 /// A document text that crashed the analyzer.
 struct Crash {
-    /// [`fingerprint`] of the text and its language.
+    /// [`fingerprint`] of the text, its language and its options.
     fingerprint: u64,
     error: ParseError,
+    /// When it crashed.
+    at: Instant,
 }
+
+/// How long a remembered timeout stands. Unlike a crash, a timeout can be a
+/// busy machine rather than the text, so it is tried again after this.
+const TIMEOUT_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 impl<W: Write> Server<W> {
     /// A server that scores in process: for tests of everything around scoring.
@@ -229,8 +236,9 @@ impl<W: Write> Server<W> {
         if text.len() as u64 > self.max_bytes {
             return self.too_large(uri);
         }
-        let fingerprint = fingerprint(lang, text);
-        if let Some(crash) = self.crashed.get(uri).filter(|c| c.fingerprint == fingerprint) {
+        let fingerprint = fingerprint(lang, &opts, text);
+        let remembered = self.crashed.get(uri).filter(|c| c.fingerprint == fingerprint && !c.stale());
+        if let Some(crash) = remembered {
             let message = crash.error.message.clone();
             return self.publish_crash(uri, text, &message);
         }
@@ -309,7 +317,11 @@ impl<W: Write> Server<W> {
             }
         );
         if about_the_text {
-            self.crashed.insert(uri.to_string(), Crash { fingerprint, error });
+            self.crashed.insert(uri.to_string(), Crash {
+                    fingerprint,
+                    error,
+                    at: Instant::now(),
+                },);
         }
         self.publish_crash(uri, text, &message)
     }
@@ -459,13 +471,28 @@ pub fn serve(program: &'static str, reg: &Registry) -> io::Result<()> {
     Ok(())
 }
 
-/// Identifies a document text and the language it was scored as. Collisions
-/// are negligible at 64 bits; one would only re-show a crash warning.
-fn fingerprint(lang: Lang, text: &str) -> u64 {
+/// Identifies a document text and the language and options it was scored
+/// with, so new settings try it again. Collisions are negligible at 64 bits;
+/// one would only re-show a crash warning.
+fn fingerprint(lang: Lang, opts: &LangOptions, text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     lang.id().hash(&mut hasher);
+    opts.iter().for_each(|option| option.hash(&mut hasher));
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+impl Crash {
+    /// A timeout past [`TIMEOUT_RETRY_AFTER`], to be tried again.
+    fn stale(&self) -> bool {
+        let timed_out = matches!(
+            self.error.kind,
+            ParseErrorKind::Crashed {
+                reason: CrashReason::Timeout
+            }
+        );
+        timed_out && self.at.elapsed() >= TIMEOUT_RETRY_AFTER
+    }
 }
 
 /// The document URI a text-document notification is about.
@@ -1235,6 +1262,35 @@ mod tests {
         open(&mut s, "file:///x/a.fk", "CRASH \n");
         assert_eq!(logs_only(&mut s), 1, "changed text is tried again");
         assert_eq!(s.supervisor.spawned(), 2);
+    }
+
+    #[test]
+    fn a_settings_change_retries_a_remembered_crash() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        assert_eq!(s.supervisor.spawned(), 1);
+        s.init.set_option(&FAKE, "skip-all", false);
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        assert_eq!(s.supervisor.spawned(), 2, "new options, so the text is tried again");
+    }
+
+    #[test]
+    fn a_remembered_timeout_is_retried_after_a_minute() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        let crash = s.crashed.get_mut("file:///x/a.fk").unwrap();
+        crash.error.kind = ParseErrorKind::Crashed {
+            reason: CrashReason::Timeout,
+        };
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        assert_eq!(s.supervisor.spawned(), 1, "a fresh timeout is answered from memory");
+
+        let crash = s.crashed.get_mut("file:///x/a.fk").unwrap();
+        crash.at = std::time::Instant::now()
+            .checked_sub(TIMEOUT_RETRY_AFTER)
+            .expect("the clock is past a minute");
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        assert_eq!(s.supervisor.spawned(), 2, "a minute-old timeout is tried again");
     }
 
     #[test]
