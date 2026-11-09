@@ -28,7 +28,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Score at which a function starts warning. Twice this value is an error.
@@ -37,6 +37,18 @@ pub const DEFAULT_THRESHOLD: u32 = 11;
 /// Upper bound on a JSON-RPC body, so a bogus `Content-Length` cannot ask us to
 /// allocate an arbitrary amount of memory.
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+/// Longest header line read. LSP headers are a few dozen bytes; a longer line
+/// is consumed up to its newline and its frame skipped.
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+
+/// Most bytes consumed looking for the newline that ends an over-long header
+/// line. Past this the stream has no recognisable framing and the session ends.
+const MAX_HEADER_DISCARD_BYTES: usize = MAX_BODY_BYTES;
+
+/// Most header lines in one frame (LSP defines two). Past this the frame is
+/// skipped and reading resumes with the next line.
+const MAX_HEADER_LINES: usize = 64;
 
 /// JSON-RPC error code for a method the server does not implement.
 const METHOD_NOT_FOUND: i32 = -32601;
@@ -463,12 +475,28 @@ pub fn serve(program: &'static str, reg: &Registry) -> io::Result<()> {
     let mut stdin = stdin.lock();
     let supervisor = Supervisor::new(SupervisorConfig::lsp());
     let mut server = Server::with_supervisor(program, reg, io::stdout(), supervisor);
-    while let Some(msg) = read_message(&mut stdin)? {
-        if !server.handle(&msg)? {
-            break;
+    serve_frames(&mut stdin, &mut server)
+}
+
+/// Read frames from `input` and hand each to `server` until `exit` or end of
+/// input, logging every frame that had to be skipped.
+fn serve_frames<W: Write>(input: &mut impl BufRead, server: &mut Server<W>) -> io::Result<()> {
+    let mut notes = Vec::new();
+    loop {
+        let frame = read_message(input, &mut notes)?;
+        for note in notes.drain(..) {
+            server.log(&note)?;
+        }
+        match frame {
+            Frame::Message(msg) => {
+                if !server.handle(&msg)? {
+                    return Ok(());
+                }
+            }
+            Frame::Skipped => {}
+            Frame::End => return Ok(()),
         }
     }
-    Ok(())
 }
 
 /// Identifies a document text and the language and options it was scored
@@ -550,40 +578,148 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Parse a `Content-Length` header value, rejecting anything unusable.
+/// Parse a `Content-Length` header value: a positive byte count, of any size.
+/// [`read_message`] decides what to do with one past [`MAX_BODY_BYTES`].
 fn parse_content_length(line: &str) -> Option<usize> {
     let (name, value) = line.split_once(':')?;
     if !name.trim().eq_ignore_ascii_case("content-length") {
         return None;
     }
     let len: usize = value.trim().parse().ok()?;
-    (len > 0 && len <= MAX_BODY_BYTES).then_some(len)
+    (len > 0).then_some(len)
 }
 
-/// Read one framed message. `Ok(None)` at end of input; `Value::Null` for a
-/// frame that cannot be used, which the caller ignores.
-fn read_message(input: &mut impl BufRead) -> io::Result<Option<Value>> {
+/// One read from the client.
+enum Frame {
+    /// A decoded body; `Value::Null` when it is not JSON, which the caller ignores.
+    Message(Value),
+    /// A frame that could not be used and was consumed whole.
+    Skipped,
+    /// End of input: the client is gone, and the session ends cleanly.
+    End,
+}
+
+/// One header line read by [`read_header_line`].
+enum HeaderLine {
+    /// The line's bytes, newline included.
+    Line(Vec<u8>),
+    /// A line past [`MAX_HEADER_LINE_BYTES`], consumed through its newline.
+    TooLong,
+    /// End of input, or an over-long line with no newline in reach.
+    End,
+}
+
+/// Read one header line of at most [`MAX_HEADER_LINE_BYTES`]. A longer line
+/// is consumed through its newline, at most [`MAX_HEADER_DISCARD_BYTES`]
+/// further; past that, or at end of input, the stream is over.
+fn read_header_line(input: &mut impl BufRead, notes: &mut Vec<String>) -> io::Result<HeaderLine> {
+    let mut line = Vec::new();
+    let cap = MAX_HEADER_LINE_BYTES as u64 + 1;
+    let n = Read::take(&mut *input, cap).read_until(b'\n', &mut line)?;
+    if line.ends_with(b"\n") {
+        return Ok(HeaderLine::Line(line));
+    }
+    // No newline: either the input ended (a partial line is no frame) or the
+    // line is over-long.
+    if n <= MAX_HEADER_LINE_BYTES {
+        return Ok(HeaderLine::End);
+    }
+    if skip_through_newline(input, MAX_HEADER_DISCARD_BYTES)? {
+        notes.push(format!(
+            "skipped a frame: a header line longer than {MAX_HEADER_LINE_BYTES} bytes"
+        ));
+        return Ok(HeaderLine::TooLong);
+    }
+    notes.push(format!(
+        "a header line ran past {MAX_HEADER_DISCARD_BYTES} bytes without a newline; closing the session"
+    ));
+    Ok(HeaderLine::End)
+}
+
+/// Consume input through the next `\n`, at most `limit` bytes, without
+/// buffering it. `false` if the input ended or the limit came first. Each pass
+/// consumes at least one byte or returns, so it makes at most `limit` passes.
+fn skip_through_newline(input: &mut impl BufRead, limit: usize) -> io::Result<bool> {
+    let mut consumed = 0;
+    while consumed < limit {
+        let buf = input.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(false);
+        }
+        let window = &buf[..buf.len().min(limit - consumed)];
+        if let Some(at) = window.iter().position(|&b| b == b'\n') {
+            input.consume(at + 1);
+            return Ok(true);
+        }
+        let taken = window.len();
+        input.consume(taken);
+        consumed += taken;
+    }
+    Ok(false)
+}
+
+/// Read one framed message. A header line that is not UTF-8 is skipped; a
+/// frame with an over-long header line or a body past [`MAX_BODY_BYTES`] is
+/// consumed whole and skipped. Each such event pushes one line onto `notes`
+/// for the server log. End of input anywhere, including part-way through a
+/// body, is [`Frame::End`].
+fn read_message(input: &mut impl BufRead, notes: &mut Vec<String>) -> io::Result<Frame> {
     let mut len = None;
-    loop {
-        let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
-            return Ok(None); // EOF
+    let mut bad = false;
+    for _ in 0..MAX_HEADER_LINES {
+        let line = match read_header_line(input, notes)? {
+            HeaderLine::Line(line) => line,
+            HeaderLine::TooLong => {
+                bad = true;
+                continue;
+            }
+            HeaderLine::End => return Ok(Frame::End),
+        };
+        if line == b"\r\n" || line == b"\n" {
+            return read_body(input, len, bad, notes);
         }
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        // Anything that is not a usable Content-Length is skipped rather than
-        // fatal: a malformed frame must not take the server down.
-        if let Some(n) = parse_content_length(&line) {
+        let Ok(line) = std::str::from_utf8(&line) else {
+            notes.push("skipped a header line that is not valid UTF-8".to_string());
+            continue;
+        };
+        // Anything that is not a Content-Length is skipped rather than fatal:
+        // a malformed frame must not take the server down.
+        if let Some(n) = parse_content_length(line) {
             len = Some(n);
         }
     }
+    notes.push(format!("skipped a frame: more than {MAX_HEADER_LINES} header lines"));
+    Ok(Frame::Skipped)
+}
+
+/// Read the body after a header block. Without a length nothing can be read
+/// and the frame is skipped; a `bad` frame or one past [`MAX_BODY_BYTES`] has
+/// exactly `len` bytes discarded, so the next frame starts where it should.
+fn read_body(
+    input: &mut impl BufRead,
+    len: Option<usize>,
+    bad: bool,
+    notes: &mut Vec<String>,
+) -> io::Result<Frame> {
     let Some(len) = len else {
-        return Ok(Some(Value::Null)); // header block with no length
+        return Ok(Frame::Skipped); // header block with no usable length
     };
+    if bad || len > MAX_BODY_BYTES {
+        if len > MAX_BODY_BYTES {
+            notes.push(format!(
+                "skipped a frame of {len} bytes: larger than {MAX_BODY_BYTES} bytes"
+            ));
+        }
+        let wanted = len as u64;
+        let discarded = io::copy(&mut Read::take(&mut *input, wanted), &mut io::sink())?;
+        return Ok(if discarded < wanted { Frame::End } else { Frame::Skipped });
+    }
     let mut body = vec![0u8; len];
-    input.read_exact(&mut body)?;
-    Ok(Some(serde_json::from_slice(&body).unwrap_or(Value::Null)))
+    match input.read_exact(&mut body) {
+        Ok(()) => Ok(Frame::Message(serde_json::from_slice(&body).unwrap_or(Value::Null))),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(Frame::End),
+        Err(e) => Err(e),
+    }
 }
 
 /// The LSP range covering 0-based line `row` of `text`, in UTF-16 units.
@@ -751,7 +887,13 @@ mod tests {
     fn sent(server: &mut Server<Vec<u8>>) -> Vec<Value> {
         let bytes = std::mem::take(&mut server.out);
         let mut input = io::Cursor::new(bytes);
-        std::iter::from_fn(|| read_message(&mut input).unwrap()).collect()
+        let mut notes = Vec::new();
+        let mut messages = Vec::new();
+        while let Frame::Message(msg) = read_message(&mut input, &mut notes).unwrap() {
+            messages.push(msg);
+        }
+        assert!(notes.is_empty(), "the server wrote a bad frame: {notes:?}");
+        messages
     }
 
     fn published(server: &mut Server<Vec<u8>>) -> Vec<Value> {
@@ -778,11 +920,86 @@ mod tests {
         assert_eq!(parse_content_length("Content-Length: banana\r\n"), None);
         assert_eq!(parse_content_length("Content-Length: 0\r\n"), None);
         assert_eq!(parse_content_length("nonsense\r\n"), None);
-        assert_eq!(
-            parse_content_length(&format!("Content-Length: {}\r\n", MAX_BODY_BYTES + 1)),
-            None,
-            "an oversized body must not be allocated"
-        );
+    }
+
+    /// Every frame `read_message` makes of `bytes`, by kind, and the notes.
+    fn frames(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
+        let mut input = io::Cursor::new(bytes.to_vec());
+        let mut notes = Vec::new();
+        let mut kinds = Vec::new();
+        for _ in 0..16 {
+            match read_message(&mut input, &mut notes).unwrap() {
+                Frame::Message(msg) => kinds.push(msg["id"].to_string()),
+                Frame::Skipped => kinds.push("skipped".into()),
+                Frame::End => break,
+            }
+        }
+        (kinds, notes)
+    }
+
+    const SHUTDOWN_7: &str = r#"{"id":7,"method":"shutdown"}"#;
+
+    fn frame(body: &str) -> String {
+        format!("Content-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn an_oversized_body_is_discarded_exactly_without_being_allocated() {
+        let len = MAX_BODY_BYTES + 1;
+        let mut bytes = format!("Content-Length: {len}\r\n\r\n").into_bytes();
+        bytes.resize(bytes.len() + len, b'\n');
+        bytes.extend_from_slice(frame(SHUTDOWN_7).as_bytes());
+        let (kinds, notes) = frames(&bytes);
+        assert_eq!(kinds, ["skipped", "7"]);
+        assert_eq!(notes.len(), 1, "logged once: {notes:?}");
+    }
+
+    #[test]
+    fn a_body_cut_short_by_end_of_input_ends_cleanly() {
+        let oversized = format!("Content-Length: {}\r\n\r\n{{}}", MAX_BODY_BYTES + 1);
+        assert_eq!(frames(oversized.as_bytes()).0, Vec::<String>::new());
+        assert_eq!(frames(b"Content-Length: 10\r\n\r\n{}").0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_over_long_header_line_skips_its_frame_body_and_all() {
+        let junk = "a".repeat(MAX_HEADER_LINE_BYTES * 3);
+        let bytes = format!("X: {junk}\r\n{}{}", frame(SHUTDOWN_7), frame(SHUTDOWN_7));
+        let (kinds, notes) = frames(bytes.as_bytes());
+        assert_eq!(kinds, ["skipped", "7"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    #[test]
+    fn a_header_line_exactly_at_the_cap_is_read() {
+        let pad = "a".repeat(MAX_HEADER_LINE_BYTES - "X: \r\n".len());
+        let bytes = format!("X: {pad}\r\n{}", frame(SHUTDOWN_7));
+        assert_eq!(frames(bytes.as_bytes()), (vec!["7".to_string()], vec![]));
+    }
+
+    #[test]
+    fn a_header_line_with_no_newline_in_reach_ends_the_session() {
+        let bytes = "a".repeat(MAX_HEADER_LINE_BYTES + MAX_HEADER_DISCARD_BYTES + 2);
+        let (kinds, notes) = frames(bytes.as_bytes());
+        assert!(kinds.is_empty());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    #[test]
+    fn a_non_utf8_header_line_is_skipped_and_the_frame_is_read() {
+        let mut bytes = b"X: \xff\r\n".to_vec();
+        bytes.extend_from_slice(frame(SHUTDOWN_7).as_bytes());
+        let (kinds, notes) = frames(&bytes);
+        assert_eq!(kinds, ["7"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    #[test]
+    fn too_many_header_lines_skip_the_frame() {
+        let bytes = "X: y\r\n".repeat(MAX_HEADER_LINES + 1);
+        let (kinds, notes) = frames(bytes.as_bytes());
+        assert_eq!(kinds, ["skipped"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
     }
 
     #[test]

@@ -162,6 +162,95 @@ fn a_malformed_frame_does_not_take_the_server_down() {
     }
 }
 
+/// `MAX_BODY_BYTES` in the server: the largest body it will read.
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// `MAX_HEADER_LINE_BYTES` in the server: the longest header line it reads.
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+
+impl Server {
+    /// Write raw bytes to the server's stdin, framing and all.
+    fn send_raw(&mut self, bytes: &[u8]) {
+        let stdin = self.child.stdin.as_mut().unwrap();
+        stdin.write_all(bytes).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// The next response (a message with an id), and the log lines before it.
+    fn response(&mut self) -> (Value, Vec<String>) {
+        let mut logs = Vec::new();
+        loop {
+            let msg = self.recv();
+            if msg.get("id").is_some() && msg.get("method").is_none() {
+                return (msg, logs);
+            }
+            if msg["method"] == "window/logMessage" {
+                logs.push(msg["params"]["message"].as_str().unwrap_or_default().to_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn an_oversized_frame_is_discarded_and_the_next_requests_are_answered() {
+    let mut s = Server::start("cmplx");
+    let len = MAX_BODY_BYTES + 1;
+    s.send_raw(format!("Content-Length: {len}\r\n\r\n").as_bytes());
+    // The body is a shutdown request padded with spaces: if any of it were
+    // read as a frame, an id 99 reply would turn up.
+    let mut body = br#"{"jsonrpc":"2.0","id":99,"method":"shutdown"}"#.to_vec();
+    body.resize(len, b' ');
+    s.send_raw(&body);
+    s.send(json!({ "jsonrpc": "2.0", "id": 6, "method": "shutdown" }));
+    s.send(json!({
+        "jsonrpc": "2.0", "id": 7, "method": "initialize",
+        "params": { "rootUri": null, "capabilities": {} }
+    }));
+
+    let (shutdown, logs) = s.response();
+    assert_eq!(shutdown["id"], 6, "logs: {logs:?}");
+    assert_eq!(logs.len(), 1, "one log line for the oversized frame: {logs:?}");
+    assert!(logs[0].contains(&len.to_string()), "{logs:?}");
+    let (initialize, _) = s.response();
+    assert_eq!(initialize["id"], 7);
+}
+
+#[test]
+fn an_oversized_frame_cut_short_by_eof_ends_the_session_cleanly() {
+    let mut s = Server::start("cmplx");
+    s.send_raw(format!("Content-Length: {}\r\n\r\n{{}}", MAX_BODY_BYTES + 1).as_bytes());
+    drop(s.child.stdin.take());
+    let status = s.child.wait().unwrap();
+    assert!(status.success(), "EOF mid-discard is the end of input, not an error: {status}");
+}
+
+#[test]
+fn an_over_long_header_line_skips_its_frame_and_the_server_lives_on() {
+    let mut s = Server::start("cmplx");
+    let junk = "a".repeat(MAX_HEADER_LINE_BYTES * 2);
+    let body = json!({ "jsonrpc": "2.0", "id": 99, "method": "shutdown" }).to_string();
+    s.send_raw(
+        format!("X-Junk: {junk}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+    );
+    s.send(json!({ "jsonrpc": "2.0", "id": 6, "method": "shutdown" }));
+
+    let (reply, logs) = s.response();
+    assert_eq!(reply["id"], 6, "the frame with the long header is skipped whole");
+    assert!(logs.iter().any(|l| l.contains("header line")), "{logs:?}");
+}
+
+#[test]
+fn a_header_line_that_is_not_utf8_is_skipped_and_its_frame_still_served() {
+    let mut s = Server::start("cmplx");
+    let body = json!({ "jsonrpc": "2.0", "id": 6, "method": "shutdown" }).to_string();
+    let mut frame = b"X-Junk: \xff\xfe\r\n".to_vec();
+    frame.extend_from_slice(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes());
+    s.send_raw(&frame);
+
+    let (reply, logs) = s.response();
+    assert_eq!(reply["id"], 6);
+    assert!(logs.iter().any(|l| l.contains("UTF-8")), "{logs:?}");
+}
+
 impl Server {
     fn did_open(&mut self, uri: &str, text: &str) {
         self.send(json!({
