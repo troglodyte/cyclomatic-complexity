@@ -39,6 +39,11 @@ impl LangOptions {
         self.0.insert(key, value);
     }
 
+    /// Every explicitly set value, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, bool)> + '_ {
+        self.0.iter().map(|(key, value)| (*key, *value))
+    }
+
     /// Layer `self` over `lower`; `self` wins on conflicts.
     pub fn or(self, lower: LangOptions) -> LangOptions {
         let mut merged = lower.0;

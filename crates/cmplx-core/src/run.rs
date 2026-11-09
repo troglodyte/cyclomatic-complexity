@@ -9,6 +9,7 @@ use crate::language::{analyze_bounded, Lang, Registry};
 use crate::model::{ParseError, ParseErrorKind};
 use crate::report::{self, Filter, Row, Style, Summary};
 use crate::walk::{self, Scope};
+use crate::worker::{self, WORKER_FLAG};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,9 @@ pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// serve `--lsp` or score the given paths.
 pub fn run(program: &'static str, reg: Registry) -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(WORKER_FLAG) {
+        return serve_worker(program, &reg);
+    }
     let cli = match parse_args(program, &args, &reg) {
         Ok(Some(cli)) => cli,
         Ok(None) => return ExitCode::SUCCESS,
@@ -73,6 +77,18 @@ fn serve_lsp(program: &'static str, reg: &Registry) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{program}: --lsp: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Serve analysis requests on stdio (see [`crate::worker`]). Only a broken
+/// stdio ends it early; that is reported on stderr, since stdout is the protocol.
+fn serve_worker(program: &'static str, reg: &Registry) -> ExitCode {
+    match worker::serve(reg, &mut io::stdin().lock(), &mut io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{program}: {WORKER_FLAG}: {e}");
             ExitCode::from(2)
         }
     }
@@ -303,11 +319,12 @@ fn score_into(
 
 /// The warning for a file that was not scored: a syntax error is labelled a
 /// parse error; a file refused as too deep was never parsed, and its message
-/// says so on its own.
+/// says so on its own; a crash has no line, and its message is complete.
 fn failure_line(name: &str, e: &ParseError) -> String {
     match e.kind {
         ParseErrorKind::Syntax => format!("{name}:{}: parse error: {}", e.line, e.message),
         ParseErrorKind::TooDeep { .. } => format!("{name}:{}: {}", e.line, e.message),
+        ParseErrorKind::Crashed { .. } => format!("{name}: {}", e.message),
     }
 }
 
