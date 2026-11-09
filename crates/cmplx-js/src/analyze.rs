@@ -149,6 +149,9 @@ struct Analyzer<'a> {
     t: Vec<Token<'a>>,
     mask: Vec<bool>,
     pairs: Vec<Option<usize>>,
+    /// Per token, the nearest opener before it that no closer between them
+    /// closes, counting `(`, `[` and `{` alike (see [`Analyzer::enclosing_openers`]).
+    enclosing: Vec<Option<usize>>,
     funcs: Vec<Func>,
     opts: Options,
 }
@@ -177,10 +180,12 @@ impl<'a> Analyzer<'a> {
             t,
             mask: vec![false; n],
             pairs: vec![None; n],
+            enclosing: Vec::new(),
             funcs: Vec::new(),
             opts,
         };
         a.match_brackets();
+        a.enclosing = a.enclosing_openers();
         a
     }
 
@@ -207,6 +212,33 @@ impl<'a> Analyzer<'a> {
                 _ => {}
             }
         }
+    }
+
+    /// For each token, the opener a backward scan from it stops at: the
+    /// nearest `(`, `[` or `{` before it with as many closers as openers
+    /// between, of any bracket type. One forward pass with a stack does it: an
+    /// opener is pushed, any closer pops one (a closer with none open is
+    /// ignored), and each token's answer is the top of the stack. This is what
+    /// [`Analyzer::name_before`] needs, without a scan per callback.
+    fn enclosing_openers(&self) -> Vec<Option<usize>> {
+        let mut stack: Vec<usize> = Vec::new();
+        let mut out = Vec::with_capacity(self.t.len());
+        for (i, tk) in self.t.iter().enumerate() {
+            out.push(stack.last().copied());
+            if tk.kind != Kind::Punct {
+                continue;
+            }
+            match tk.text {
+                "(" | "[" | "{" => stack.push(i),
+                ")" | "]" | "}" => {
+                    // A closer with nothing open is ignored: the backward scan
+                    // never stops at an opener before it either.
+                    stack.pop();
+                }
+                _ => {} // not a bracket
+            }
+        }
+        out
     }
 
     #[inline]
@@ -481,18 +513,8 @@ impl<'a> Analyzer<'a> {
         if self.p(i, "(") || self.p(i, ",") {
             let mut o = i;
             if self.p(i, ",") {
-                let mut d: i32 = 0;
-                while o >= 0 {
-                    if self.is_close(o) {
-                        d += 1;
-                    } else if self.is_open(o) {
-                        if d == 0 {
-                            break;
-                        }
-                        d -= 1;
-                    }
-                    o -= 1;
-                }
+                // The opener of the list this comma separates, or -1.
+                o = self.enclosing[i as usize].map_or(-1, |x| x as isize);
             }
             if o > 0 && self.p(o, "(") {
                 let c = o - 1;
@@ -1391,6 +1413,48 @@ mod tests {
         ] {
             let _ = analyze(src, true, Options::default());
         }
+    }
+
+    /// Callbacks after a comma, in calls, arrays, objects and nested calls,
+    /// with stray and mismatched brackets, named as the original back-scan
+    /// named them.
+    #[test]
+    fn callbacks_after_commas_keep_their_names() {
+        let src = "f(a, () => 0, x => 1);\n\
+                   [g(1, () => 2), () => 3];\n\
+                   h(i(j, () => 4), () => 5, [6, () => 7]);\n\
+                   ({ k: 1, m: () => 8 }, () => 9);\n\
+                   n(o)(p, () => 10);\n\
+                   q(r], () => 11);\n\
+                   s(t)), () => 12);\n\
+                   u((v, () => 13);\n\
+                   ), () => 14;\n";
+        let names: Vec<String> = analyze(src, true, Options::default())
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "f(\u{2026})", "f(\u{2026})", "g(\u{2026})", ANON, "i(\u{2026})", "h(\u{2026})", ANON,
+                "m", ANON, ANON, ANON, ANON, ANON, ANON
+            ]
+        );
+    }
+
+    /// Entries in [`a_long_array_of_callbacks_is_analyzed_in_linear_time`].
+    const LONG_LIST_ENTRIES: usize = 100_000;
+
+    #[test]
+    fn a_long_array_of_callbacks_is_analyzed_in_linear_time() {
+        let src = format!("[{}]", "()=>0,".repeat(LONG_LIST_ENTRIES));
+        // A debug build is about ten times slower than release.
+        let budget = std::time::Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 2 });
+        let started = std::time::Instant::now();
+        let funcs = analyze(&src, true, Options::default());
+        let took = started.elapsed();
+        assert_eq!(funcs.len(), LONG_LIST_ENTRIES);
+        assert!(took < budget, "{LONG_LIST_ENTRIES} callbacks took {took:?}, over {budget:?}");
     }
 
     #[test]
