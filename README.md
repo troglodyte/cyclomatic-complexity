@@ -304,6 +304,7 @@ language-servers = ["rust-analyzer", "cmplx"]
 ```
 
 `limit` is the `--max` value or `null`; `overLimit` counts functions above it.
+A function scoring above 100 also carries `"capped": true` (see [Limits](#limits)).
 `kind` is a JSON id (`trait_fn`) where the table shows a label (`trait fn`).
 
 ## Limitations
@@ -335,15 +336,23 @@ file, the rest of the run continues, and the run exits 2.
 
 | Cap | Value | At the cap |
 | --- | --- | --- |
-| Rust nesting depth | 64 levels of `(`, `[` or `{` | `path:line: not scored: too deeply nested to score (> 64 levels)`, at the line where the depth is first exceeded. In the language server, one warning on that line instead of scores. |
-| JS/TS nesting depth | none needed | The lexer and analyzer keep explicit stacks; 100,000 levels are scored. |
+| Nesting depth, every language | 100 levels of `(`, `[` or `{` | `path:line: nesting deeper than 100 levels; this code needs restructuring`, at the line where the depth is first exceeded. In the language server, one warning on that line, with the same text, instead of scores. |
 | Directory depth | 64 levels below each path given | `path: directory nesting deeper than 64; not scanned`. The directory is skipped and the rest of the tree is scanned. |
 | File size | 10 MB (10,485,760 bytes), files and stdin | `path: larger than 10 MB; not scored` (`<stdin>` for stdin). The language server publishes no diagnostics for a larger document and logs once. |
 
-The Rust cap exists because `syn` parses recursively, and a stack overflow
-aborts the process instead of failing one file. Rust files are parsed on their
-own 16 MB thread. The depth is counted on tokens, so brackets in strings,
-chars and comments do not count.
+The depth is counted before a file is analyzed, in one pass that stops at the
+first line past the cap. Brackets inside strings, characters and comments do
+not count, nor do those in JS/TS template text, regular expressions and JSX
+text. Rust needs the cap because `syn` parses recursively and a stack overflow
+aborts the process instead of failing one file; Rust files are also parsed on
+their own 16 MB thread. JS/TS is held to the same cap so that the limit does
+not depend on the language. Any other analyzer failure will be handled by a
+supervisor process, planned in the next commit series.
+
+Scores above 100 show as `100+` in the table, in language-server diagnostics
+and in hover. JSON keeps the real number in `complexity` and adds
+`"capped": true` to those functions only. `--max`, `--min`, `--top`,
+`--sort` and `overLimit` all use the real number.
 
 ## Development
 
