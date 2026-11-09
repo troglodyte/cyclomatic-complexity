@@ -8,19 +8,25 @@
 //! nothing to overlap and no state to share.
 //!
 //! Each document is scored by the registered language that claims its path,
-//! with that language's options. A document no language claims, or one the
+//! with that language's options, in one worker process kept for the session
+//! (see [`crate::supervisor`]). An analyzer crash becomes one warning on that
+//! document; the worker is restarted on the next document, at most
+//! [`crate::supervisor::MAX_WORKER_RESTARTS`] times a minute. A document no language claims, or one the
 //! language skips (a `.d.ts`, say), is published with no diagnostics.
 //!
 //! **stdout is the protocol.** Nothing in this module may print to it except
 //! through `Server::send`.
 
 use crate::config::{FileConfig, Watched};
-use crate::language::{analyze_bounded, Lang, LangOptions, Registry};
-use crate::model::{Func, ParseError, ParseErrorKind};
+use crate::language::{Lang, LangOptions, Registry};
+use crate::model::{CrashReason, Func, ParseError, ParseErrorKind};
 use crate::report::shown_complexity;
 use crate::run::{size_label, MAX_FILE_BYTES};
+use crate::supervisor::{Supervisor, SupervisorConfig};
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -65,11 +71,34 @@ struct Server<W: Write> {
     config: Option<Watched>,
     /// Largest document scored; [`MAX_FILE_BYTES`] outside tests.
     max_bytes: u64,
+    /// Scores every document, in one worker for the whole session.
+    supervisor: Supervisor,
+    /// Per URI, the text whose analysis crashed and how, so that the same
+    /// text is answered from here rather than crashing another worker.
+    crashed: HashMap<String, Crash>,
     out: W,
 }
 
+/// A document text that crashed the analyzer.
+struct Crash {
+    /// [`fingerprint`] of the text and its language.
+    fingerprint: u64,
+    error: ParseError,
+}
+
 impl<W: Write> Server<W> {
+    /// A server that scores in process: for tests of everything around scoring.
+    #[cfg(test)]
     fn new(program: &'static str, reg: &Registry, out: W) -> Server<W> {
+        Server::with_supervisor(program, reg, out, Supervisor::in_process())
+    }
+
+    fn with_supervisor(
+        program: &'static str,
+        reg: &Registry,
+        out: W,
+        supervisor: Supervisor,
+    ) -> Server<W> {
         Server {
             program,
             reg: reg.clone(),
@@ -77,6 +106,8 @@ impl<W: Write> Server<W> {
             init: FileConfig::default(),
             config: None,
             max_bytes: MAX_FILE_BYTES,
+            supervisor,
+            crashed: HashMap::new(),
             out,
         }
     }
@@ -198,10 +229,25 @@ impl<W: Write> Server<W> {
         if text.len() as u64 > self.max_bytes {
             return self.too_large(uri);
         }
-        let funcs = match analyze_bounded(lang, text, &path, &opts) {
+        let fingerprint = fingerprint(lang, text);
+        if let Some(crash) = self.crashed.get(uri).filter(|c| c.fingerprint == fingerprint) {
+            let message = crash.error.message.clone();
+            return self.publish_crash(uri, text, &message);
+        }
+        let result = self.supervisor.analyze(lang, text, &path, &opts);
+        for warning in self.supervisor.take_warnings() {
+            self.log(&warning)?;
+        }
+        if !matches!(&result, Err(ParseError { kind: ParseErrorKind::Crashed { .. }, .. })) {
+            self.crashed.remove(uri);
+        }
+        let funcs = match result {
             Ok(funcs) => funcs,
             Err(e @ ParseError { kind: ParseErrorKind::TooDeep { .. }, .. }) => {
                 return self.too_deep(uri, text, &e)
+            }
+            Err(e @ ParseError { kind: ParseErrorKind::Crashed { .. }, .. }) => {
+                return self.crashed(uri, text, fingerprint, e)
             }
             Err(e) => return self.parse_failed(uri, &format!("{uri}: {}: {}", e.line, e.message)),
         };
@@ -242,6 +288,34 @@ impl<W: Write> Server<W> {
             "severity": SEVERITY_WARNING,
             "source": self.program,
             "message": error.message,
+        });
+        self.publish(uri, vec![diagnostic])
+    }
+
+    /// Log a crash and publish it as one warning on line 0. Every crash but
+    /// a paused restart is remembered against this exact text, so that
+    /// re-sending it (a save, an undo) does not crash another worker.
+    fn crashed(&mut self, uri: &str, text: &str, fingerprint: u64, error: ParseError) -> io::Result<()> {
+        self.log(&format!("{uri}: {}", error.message))?;
+        let message = error.message.clone();
+        if !matches!(error.kind, ParseErrorKind::Crashed { reason: CrashReason::GaveUp }) {
+            self.crashed.insert(uri.to_string(), Crash { fingerprint, error });
+        }
+        self.publish_crash(uri, text, &message)
+    }
+
+    /// Publish the one warning for a document the analyzer crashed on, and
+    /// forget its scores: like a too-deep document, it stays unscored until
+    /// edited, so the last good diagnostics would only mislead.
+    fn publish_crash(&mut self, uri: &str, text: &str, message: &str) -> io::Result<()> {
+        let doc = self.docs.entry(uri.to_string()).or_default();
+        doc.funcs.clear();
+        doc.last_error = None;
+        let diagnostic = json!({
+            "range": line_range(text, 0),
+            "severity": SEVERITY_WARNING,
+            "source": self.program,
+            "message": message,
         });
         self.publish(uri, vec![diagnostic])
     }
@@ -317,6 +391,7 @@ impl<W: Write> Server<W> {
                     return Ok(());
                 };
                 self.docs.remove(uri);
+                self.crashed.remove(uri);
                 self.publish(uri, Vec::new())
             }
             _ => Ok(()),
@@ -357,13 +432,23 @@ impl<W: Write> Server<W> {
 pub fn serve(program: &'static str, reg: &Registry) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
-    let mut server = Server::new(program, reg, io::stdout());
+    let supervisor = Supervisor::new(SupervisorConfig::lsp());
+    let mut server = Server::with_supervisor(program, reg, io::stdout(), supervisor);
     while let Some(msg) = read_message(&mut stdin)? {
         if !server.handle(&msg)? {
             break;
         }
     }
     Ok(())
+}
+
+/// Identifies a document text and the language it was scored as. Collisions
+/// are negligible at 64 bits; one would only re-show a crash warning.
+fn fingerprint(lang: Lang, text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    lang.id().hash(&mut hasher);
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The document URI a text-document notification is about.
@@ -537,6 +622,7 @@ mod tests {
     use super::*;
     use crate::language::{LangOptions, Language, OptionSpec};
     use crate::model::{Kind, ParseError, ParseErrorKind, Point};
+    use crate::supervisor::{RestartLimit, SupervisorConfig};
 
     const SKIP_ALL: OptionSpec = OptionSpec {
         key: "skip-all",
@@ -1030,6 +1116,119 @@ mod tests {
             .iter()
             .filter(|m| m["method"] == "window/logMessage")
             .count()
+    }
+
+    /// A server whose worker aborts on a request holding `CRASH` and
+    /// otherwise answers with one function `f` of complexity 20 on line 1.
+    fn crashing_server(restarts: RestartLimit) -> Server<Vec<u8>> {
+        let script = r#"
+            while IFS= read -r line; do
+                case "$line" in *CRASH*) echo boom >&2; exit 3;; esac
+                id=${line#\{\"id\":}; id=${id%%,*}
+                printf '{"id":%s,"functions":[{"name":"f","kind":{"id":"fn","label":"fn"},"line":1,"complexity":20,"depth":0,"points":[]}]}\n' "$id"
+            done
+        "#;
+        let supervisor = Supervisor::new(SupervisorConfig {
+            command: Some(vec!["sh".into(), "-c".into(), script.into()]),
+            timeout: std::time::Duration::from_secs(5),
+            restarts,
+        });
+        let mut s = Server::with_supervisor("cmplx", &Registry::all(&[&FAKE]), Vec::new(), supervisor);
+        initialize(&mut s, Value::Null);
+        s
+    }
+
+    fn per_minute(max: usize) -> RestartLimit {
+        RestartLimit::PerWindow {
+            max,
+            window: crate::supervisor::RESTART_WINDOW,
+        }
+    }
+
+    const CRASHED: &str = "not scored: the Fake analyzer crashed (exit code 3): boom";
+
+    fn crash_warning(text_width: usize) -> Value {
+        json!([{
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": text_width },
+            },
+            "severity": 2,
+            "source": "cmplx",
+            "message": CRASHED,
+        }])
+    }
+
+    #[test]
+    fn a_crash_publishes_one_warning_at_line_0_and_logs_it() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        assert_eq!(published(&mut s)[0].as_array().unwrap().len(), 1);
+
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        let messages = sent(&mut s);
+        let logs: Vec<&Value> = messages.iter().filter(|m| m["method"] == "window/logMessage").collect();
+        assert_eq!(logs.len(), 1, "{messages:?}");
+        assert_eq!(logs[0]["params"]["message"], format!("cmplx: file:///x/a.fk: {CRASHED}"));
+        let lists: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+            .collect();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0]["params"]["diagnostics"], crash_warning(5));
+        assert_eq!(hover_line(&s, 0), Value::Null, "no stale scores");
+    }
+
+    #[test]
+    fn identical_text_that_crashed_is_answered_from_memory_without_a_restart() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        sent(&mut s);
+        assert_eq!(s.supervisor.spawned(), 1);
+
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        let messages = sent(&mut s);
+        assert_eq!(messages.len(), 1, "a publish and no log: {messages:?}");
+        assert_eq!(messages[0]["params"]["diagnostics"], crash_warning(5));
+        assert_eq!(s.supervisor.spawned(), 1, "the text was not sent again");
+
+        open(&mut s, "file:///x/a.fk", "CRASH \n");
+        assert_eq!(logs_only(&mut s), 1, "changed text is tried again");
+        assert_eq!(s.supervisor.spawned(), 2);
+    }
+
+    #[test]
+    fn a_crash_leaves_every_other_document_unaffected() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/bad.fk", "CRASH\n");
+        sent(&mut s);
+        open(&mut s, "file:///x/good.fk", "f 20\n");
+        let lists = published(&mut s);
+        assert_eq!(lists[0][0]["message"], "Complexity is 20 for fn 'f'");
+    }
+
+    #[test]
+    fn a_fixed_then_rebroken_document_crashes_again_and_close_forgets_it() {
+        let mut s = crashing_server(per_minute(10));
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        assert_eq!(logs_only(&mut s), 2, "the fix cleared the memory");
+        s.notification("textDocument/didClose", &json!({ "textDocument": { "uri": "file:///x/a.fk" } }))
+            .unwrap();
+        assert!(s.crashed.is_empty());
+    }
+
+    #[test]
+    fn over_the_restart_rate_documents_get_the_paused_warning_and_are_retried_later() {
+        let mut s = crashing_server(per_minute(0));
+        open(&mut s, "file:///x/a.fk", "CRASH\n");
+        sent(&mut s);
+        open(&mut s, "file:///x/b.fk", "f 20\n");
+        let paused = "not scored: the analyzer kept crashing; restarting is paused for a minute";
+        assert_eq!(published(&mut s)[0][0]["message"], paused);
+        open(&mut s, "file:///x/b.fk", "f 20\n");
+        assert_eq!(logs_only(&mut s), 1, "a paused document is not remembered as crashing");
     }
 
     #[test]

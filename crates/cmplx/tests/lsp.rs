@@ -716,3 +716,69 @@ fn an_untitled_document_gets_no_diagnostics() {
         assert_eq!(params["diagnostics"], json!([]), "{program}");
     }
 }
+
+/// Closures nested 3000 deep: no bracket nesting for the cap to catch, but
+/// enough to overflow the Rust analyzer's parse stack.
+fn stack_overflowing_rust() -> String {
+    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(3000))
+}
+
+impl Server {
+    /// Every message up to the reply to a hover request with `id`, which
+    /// proves the server is still answering.
+    fn until_hover_reply(&mut self, id: u64) -> Vec<Value> {
+        self.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": "file:///never-opened.rs" }, "position": { "line": 0, "character": 0 } }
+        }));
+        let mut messages = Vec::new();
+        loop {
+            let msg = self.recv();
+            if msg["id"] == id {
+                return messages;
+            }
+            messages.push(msg);
+        }
+    }
+}
+
+#[test]
+fn an_analyzer_crash_is_one_warning_and_the_server_keeps_serving() {
+    let message = "not scored: the Rust analyzer crashed (stack overflow); \
+                   the file is probably nested too deeply to analyze";
+    let mut s = Server::start("cmplx");
+    s.initialize();
+    let bad = stack_overflowing_rust();
+    s.did_open("file:///bad.rs", &bad);
+    let first = s.until_hover_reply(20);
+    let logs: Vec<&Value> = first.iter().filter(|m| m["method"] == "window/logMessage").collect();
+    assert_eq!(logs.len(), 1, "the crash is logged: {first:?}");
+    assert_eq!(logs[0]["params"]["message"], format!("cmplx: file:///bad.rs: {message}"));
+    let published: Vec<&Value> = first
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+        .collect();
+    let list = published[0]["params"]["diagnostics"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0]["message"], message);
+    assert_eq!(list[0]["severity"], 2);
+    assert_eq!(list[0]["source"], "cmplx");
+    assert_eq!(list[0]["range"]["start"]["line"], 0);
+
+    s.send(json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": "file:///good.ts", "languageId": "typescript", "version": 1, "text": js_branchy(11) } }
+    }));
+    let good = s.diagnostics();
+    assert_eq!(good["uri"], "file:///good.ts");
+    assert_eq!(good["diagnostics"][0]["message"], "Complexity is 12 for function 'f'");
+
+    s.did_change("file:///bad.rs", &bad);
+    let again = s.until_hover_reply(21);
+    assert!(
+        again.iter().all(|m| m["method"] != "window/logMessage"),
+        "identical text is answered from memory, without crashing a worker again: {again:?}"
+    );
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0]["params"]["diagnostics"][0]["message"], message);
+}
