@@ -363,17 +363,20 @@ exits 2 as for any other per-file failure:
 | No answer within 10 s | `not scored: the Rust analyzer took longer than 10 s` (the worker is killed) |
 | Any other crash | `not scored: the Rust analyzer crashed (exit code N)` or `(signal NAME)`, then the worker's first stderr line, cut to 200 characters |
 | An answer that is not a response | `not scored: the Rust analyzer sent a bad response: …` |
+| A restart that cannot be started | `not scored: the Rust analyzer could not be restarted: <error>` (counts as a restart) |
 | More than 10 restarts in one run | `not scored: the analyzer kept crashing; gave up after 10 restarts`, for every remaining file |
 
 The language server keeps one worker for the session and restarts it on the
 next document after a crash. It shows the crash as one warning on line 0 of
 that document; other documents are unaffected. It remembers the exact text
 that crashed and shows the same warning, without trying again, until the text
-changes. It restarts at most 10 times in any 60 seconds; past that, documents
+or the settings change (a timeout is tried again after a minute). It restarts at most 10 times in any 60 seconds; past that, documents
 get `not scored: the analyzer kept crashing; restarting is paused for a minute`
-until the minute is up. If the worker cannot be started at all, the binary
-prints (or logs) `running without crash protection: <error>` once and analyzes
-in its own process for the rest of the run, where a crash ends the run.
+until the minute is up. If the first worker cannot be started at all, the
+binary prints (or logs) `running without crash protection: <error>` once and
+analyzes in its own process for the rest of the run, where a crash ends the
+run. On macOS, a worker stuck in an infinite loop can outlive a parent that
+was killed with SIGKILL; it then runs until killed.
 
 Scores above 100 show as `100+` in the table, in language-server diagnostics
 and in hover. JSON keeps the real number in `complexity` and adds
