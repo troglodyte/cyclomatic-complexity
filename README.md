@@ -327,6 +327,24 @@ language-servers = ["rust-analyzer", "cmplx"]
   (`panic = "abort"`). Some editors restart a dead language server; others,
   such as Neovim, leave it stopped until you restart it.
 
+## Limits
+
+Inputs past these caps are refused rather than risk a crash or unbounded
+memory. Each refusal is a per-file problem: a warning on stderr naming the
+file, the rest of the run continues, and the run exits 2.
+
+| Cap | Value | At the cap |
+| --- | --- | --- |
+| Rust nesting depth | 64 levels of `(`, `[` or `{` | `path:line: parse error: too deeply nested to score (> 64 levels)`, at the line where the depth is first exceeded. In the language server, one warning on that line instead of scores. |
+| JS/TS nesting depth | none needed | The lexer and analyzer keep explicit stacks; 100,000 levels are scored. |
+| Directory depth | 64 levels below each path given | `path: directory nesting deeper than 64; not scanned`. The directory is skipped and the rest of the tree is scanned. |
+| File size | 10 MB (10,485,760 bytes), files and stdin | `path: larger than 10 MB; not scored` (`<stdin>` for stdin). The language server publishes no diagnostics for a larger document and logs once. |
+
+The Rust cap exists because `syn` parses recursively, and a stack overflow
+aborts the process instead of failing one file. Rust files are parsed on their
+own 16 MB thread, which holds 64 levels of the costliest nesting measured
+several times over.
+
 ## Development
 
 The workspace has `crates/cmplx-core` (model, CLI, config, output, LSP, no
