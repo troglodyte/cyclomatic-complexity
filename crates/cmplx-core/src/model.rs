@@ -34,11 +34,14 @@ pub struct ParseError {
     pub kind: ParseErrorKind,
 }
 
-/// Why a source could not be parsed, which decides how the LSP shows it.
+/// Why a source was not scored, which decides how the CLI and LSP show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseErrorKind {
-    /// Not valid source. Usually passing, while someone is typing.
+    /// Not valid source, as the language reported it. Usually passing, while
+    /// someone is typing.
     Syntax,
-    /// Nested too deeply to parse safely. Lasts until the file is edited.
-    TooDeep,
+    /// Brackets nested deeper than `limit` levels (the `ParseError`'s line is
+    /// where the depth was first exceeded), so core never handed it to the
+    /// language. Lasts until the file is edited.
+    TooDeep { limit: usize },
 }

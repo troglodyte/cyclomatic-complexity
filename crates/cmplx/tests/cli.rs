@@ -106,22 +106,22 @@ fn an_unparseable_file_warns_and_exits_two_without_stopping() {
 }
 
 #[test]
-fn a_too_deeply_nested_file_is_reported_as_not_scored() {
+fn a_file_nested_past_the_cap_is_reported_and_the_rest_is_scored() {
     let dir = temp_dir("too-deep");
-    let deep = dir.join("deep.rs");
-    let depth = cmplx_rust::MAX_NESTING + 1;
-    std::fs::write(&deep, format!("fn f() {{\n{}{};\n}}\n", "(".repeat(depth), ")".repeat(depth))).unwrap();
+    let rs = dir.join("deep.rs");
+    let js = dir.join("deep.js");
+    let depth = cmplx_core::language::MAX_NESTING + 1;
+    let parens = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+    std::fs::write(&rs, format!("fn f() {{\n{parens};\n}}\n")).unwrap();
+    std::fs::write(&js, format!("\n\nx = {parens};\n")).unwrap();
     std::fs::write(dir.join("ok.rs"), "fn g(a: bool) { if a { } }").unwrap();
 
-    let (stdout, stderr, code) = rustcx(&[dir.to_str().unwrap()]);
+    let (stdout, stderr, code) = cmplx_in(&dir, &["deep.js", "deep.rs", "ok.rs"]);
     assert_eq!(code, 2);
     assert_eq!(
         stderr,
-        format!(
-            "rustcx: {}:2: not scored: too deeply nested to score (> {} levels)\n",
-            deep.display(),
-            cmplx_rust::MAX_NESTING
-        )
+        "cmplx: deep.js:3: nesting deeper than 100 levels; this code needs restructuring\n\
+         cmplx: deep.rs:2: nesting deeper than 100 levels; this code needs restructuring\n"
     );
     assert!(stdout.contains("g"), "the good file must still be scored:\n{stdout}");
 }

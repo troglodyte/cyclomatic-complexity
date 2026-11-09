@@ -5,8 +5,8 @@
 
 use crate::cli::{parse_args, Cli};
 use crate::config::FileConfig;
-use crate::language::{Lang, Registry};
-use crate::model::ParseErrorKind;
+use crate::language::{analyze_bounded, Lang, Registry};
+use crate::model::{ParseError, ParseErrorKind};
 use crate::report::{self, Filter, Row, Style, Summary};
 use crate::walk::{self, Scope};
 use std::fs;
@@ -285,7 +285,7 @@ fn score_into(
     config: &FileConfig,
     warn: &mut impl FnMut(String),
 ) -> bool {
-    match lang.analyze(src, path, &config.options_for(lang)) {
+    match analyze_bounded(lang, src, path, &config.options_for(lang)) {
         Ok(funcs) => {
             rows.extend(funcs.into_iter().map(|func| Row {
                 file: name.to_string(),
@@ -295,18 +295,19 @@ fn score_into(
             true
         }
         Err(e) => {
-            warn(format!("{name}:{}: {}: {}", e.line, failure_label(e.kind), e.message));
+            warn(failure_line(name, &e));
             false
         }
     }
 }
 
-/// How a file that could not be parsed is described: a syntax error is a
-/// parse error; a file refused as too deep was never parsed, only not scored.
-fn failure_label(kind: ParseErrorKind) -> &'static str {
-    match kind {
-        ParseErrorKind::Syntax => "parse error",
-        ParseErrorKind::TooDeep => "not scored",
+/// The warning for a file that was not scored: a syntax error is labelled a
+/// parse error; a file refused as too deep was never parsed, and its message
+/// says so on its own.
+fn failure_line(name: &str, e: &ParseError) -> String {
+    match e.kind {
+        ParseErrorKind::Syntax => format!("{name}:{}: parse error: {}", e.line, e.message),
+        ParseErrorKind::TooDeep { .. } => format!("{name}:{}: {}", e.line, e.message),
     }
 }
 
@@ -382,6 +383,12 @@ mod tests {
         fn skip(&self, _: &Path, _: &LangOptions) -> bool {
             false
         }
+        /// A line of `(` is that many levels deep, on its own.
+        fn first_line_deeper_than(&self, src: &str, _: &Path, _: &LangOptions, limit: usize) -> Option<u32> {
+            src.lines()
+                .position(|line| line.chars().filter(|&c| c == '(').count() > limit)
+                .map(|i| i as u32 + 1)
+        }
         fn analyze(
             &self,
             src: &str,
@@ -396,13 +403,6 @@ mod tests {
                         line: line_no,
                         message: "bad".into(),
                         kind: ParseErrorKind::Syntax,
-                    });
-                }
-                if line == "deep" {
-                    return Err(ParseError {
-                        line: line_no,
-                        message: "too deeply nested to score (> 2 levels)".into(),
-                        kind: ParseErrorKind::TooDeep,
                     });
                 }
                 if line == "ext?" {
@@ -625,15 +625,15 @@ mod tests {
     }
 
     #[test]
-    fn a_too_deep_file_is_worded_as_not_scored_and_the_rest_is_still_scored() {
+    fn a_file_nested_past_the_cap_says_so_and_the_rest_is_still_scored() {
         let dir = temp_dir("too-deep-file");
-        let deep = file(&dir, "deep.rs", "f 1\ndeep\n");
+        let deep = file(&dir, "deep.rs", &format!("f 1\n{}\n", "(".repeat(101)));
         let good = file(&dir, "good.rs", "g 1\n");
         let out = execute_with(&both(), &[&deep, &good], "");
         assert_eq!(out.code, 2);
         assert_eq!(
             out.stderr,
-            format!("cmplx: {deep}:2: not scored: too deeply nested to score (> 2 levels)\n")
+            format!("cmplx: {deep}:2: nesting deeper than 100 levels; this code needs restructuring\n")
         );
         assert!(out.stdout.contains("g\n"), "got:\n{}", out.stdout);
     }

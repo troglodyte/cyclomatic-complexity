@@ -15,7 +15,7 @@
 //! through `Server::send`.
 
 use crate::config::{FileConfig, Watched};
-use crate::language::{Lang, LangOptions, Registry};
+use crate::language::{analyze_bounded, Lang, LangOptions, Registry};
 use crate::model::{Func, ParseError, ParseErrorKind};
 use crate::run::{size_label, MAX_FILE_BYTES};
 use serde_json::{json, Value};
@@ -197,9 +197,11 @@ impl<W: Write> Server<W> {
         if text.len() as u64 > self.max_bytes {
             return self.too_large(uri);
         }
-        let funcs = match lang.analyze(text, &path, &opts) {
+        let funcs = match analyze_bounded(lang, text, &path, &opts) {
             Ok(funcs) => funcs,
-            Err(e) if e.kind == ParseErrorKind::TooDeep => return self.too_deep(uri, text, &e),
+            Err(e @ ParseError { kind: ParseErrorKind::TooDeep { .. }, .. }) => {
+                return self.too_deep(uri, text, &e)
+            }
             Err(e) => return self.parse_failed(uri, &format!("{uri}: {}: {}", e.line, e.message)),
         };
         let threshold = self.settings().threshold.unwrap_or(DEFAULT_THRESHOLD);
@@ -541,8 +543,8 @@ mod tests {
     static OPTIONS: [OptionSpec; 1] = [SKIP_ALL];
 
     /// Each source line `name score` is one function on that line; a line
-    /// `deep` is a too-deep error and any other line without a space a syntax
-    /// error. `skip-all` makes the language skip every path.
+    /// of more `(` than the nesting cap is too deep, and any other line
+    /// without a space a syntax error. `skip-all` makes the language skip every path.
     struct Fake;
     impl Language for Fake {
         fn id(&self) -> &'static str {
@@ -566,19 +568,18 @@ mod tests {
         fn skip(&self, _: &Path, opts: &LangOptions) -> bool {
             opts.flag(&SKIP_ALL).unwrap_or(false)
         }
+        /// A line of `(` is that many levels deep, on its own.
+        fn first_line_deeper_than(&self, src: &str, _: &Path, _: &LangOptions, limit: usize) -> Option<u32> {
+            src.lines()
+                .position(|line| line.chars().filter(|&c| c == '(').count() > limit)
+                .map(|i| i as u32 + 1)
+        }
         fn analyze(&self, src: &str, _: &Path, _: &LangOptions) -> Result<Vec<Func>, ParseError> {
             src.lines()
                 .enumerate()
                 .filter(|(_, line)| !line.trim().is_empty())
                 .map(|(i, line)| {
                     let line_no = i as u32 + 1;
-                    if line == "deep" {
-                        return Err(ParseError {
-                            line: line_no,
-                            message: "too deep".into(),
-                            kind: ParseErrorKind::TooDeep,
-                        });
-                    }
                     let (name, cc) = line.split_once(' ').ok_or(ParseError {
                         line: line_no,
                         message: "expected `name score`".into(),
@@ -932,18 +933,18 @@ mod tests {
         open(&mut s, "file:///x/a.fk", "f 20\n");
         sent(&mut s);
 
-        open(&mut s, "file:///x/a.fk", "f 20\ndeep\n");
+        open(&mut s, "file:///x/a.fk", &format!("f 20\n{}\n", "(".repeat(101)));
         let lists = published(&mut s);
         assert_eq!(
             lists,
             vec![json!([{
                 "range": {
                     "start": { "line": 1, "character": 0 },
-                    "end": { "line": 1, "character": 4 },
+                    "end": { "line": 1, "character": 101 },
                 },
                 "severity": 2,
                 "source": "cmplx",
-                "message": "too deep",
+                "message": "nesting deeper than 100 levels; this code needs restructuring",
             }])]
         );
         assert_eq!(hover_line(&s, 0), Value::Null, "the last scores are dropped");

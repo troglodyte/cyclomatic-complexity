@@ -360,10 +360,7 @@ fn a_parse_failure_keeps_the_last_good_diagnostics() {
 
 #[test]
 fn a_too_deeply_nested_document_gets_one_warning_saying_why_and_the_server_lives_on() {
-    let message = format!(
-        "too deeply nested to score (> {} levels)",
-        cmplx_rust::MAX_NESTING
-    );
+    let message = "nesting deeper than 100 levels; this code needs restructuring";
     for program in RUST_SERVERS {
         let mut s = Server::start(program);
         s.initialize();

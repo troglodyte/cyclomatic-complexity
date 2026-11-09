@@ -3,8 +3,8 @@
 //! `syn` is a recursive-descent parser and the analyzer's walk recurses with
 //! it, so stack use grows with nesting depth. A stack overflow aborts the
 //! process (`catch_unwind` cannot catch it), which would end a CLI run and the
-//! shared language server. So a file whose `(`/`[`/`{` nesting goes deeper
-//! than [`MAX_NESTING`] is refused before `syn` sees it.
+//! shared language server. So core refuses a file whose `(`/`[`/`{` nesting
+//! goes deeper than its cap before `syn` sees it, using this scan.
 //!
 //! The depth is counted on proc-macro2's token tree. Its lexer keeps an explicit
 //! stack (`parse::token_stream` in proc-macro2 1.0.107) and its `TokenStream`
@@ -14,55 +14,39 @@
 
 use proc_macro2::{token_stream, TokenStream, TokenTree};
 
-/// Deepest `(`/`[`/`{` nesting a Rust file may have and still be scored.
-///
-/// Measured with syn 3.0.9 (`syn::parse_file` + the analyzer's walk + drop,
-/// one file per process, on a thread of the given stack): the deepest
-/// delimiter nesting that still succeeded, by what each level nests.
-///
-/// | each level      | debug 2 MB | debug 16 MB | release 2 MB | release 16 MB |
-/// |-----------------|-----------:|------------:|-------------:|--------------:|
-/// | `(`             |        142 |       1,168 |          470 |         3,758 |
-/// | `if a {`        |         76 |         623 |          293 |         2,341 |
-/// | `g(\|\| {` (2)  |         63 |         515 |          225 |         1,799 |
-/// | `\|\| {`        |         43 |         343 |          161 |         1,284 |
-///
-/// The parse runs on its own 16 MB thread (`PARSE_STACK_BYTES` in `lib.rs`),
-/// where the worst debug figure is 343.
-pub const MAX_NESTING: usize = 64;
+// Measured with syn 3.0.9 (`syn::parse_file` + the analyzer's walk + drop, one
+// file per process, on a thread of the given stack): the deepest delimiter
+// nesting that still succeeded, by what each level nests.
+//
+// | each level      | debug 2 MB | debug 16 MB | release 2 MB | release 16 MB |
+// |-----------------|-----------:|------------:|-------------:|--------------:|
+// | `(`             |        142 |       1,168 |          470 |         3,758 |
+// | `if a {`        |         76 |         623 |          293 |         2,341 |
+// | `g(|| {` (2)    |         63 |         515 |          225 |         1,799 |
+// | `|| {`          |         43 |         343 |          161 |         1,284 |
+//
+// Core's cap is 100 levels. The parse runs on its own 16 MB thread
+// (`PARSE_STACK_BYTES` in `lib.rs`), where the worst debug figure is 343.
 
-/// Why a file is refused, and where.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TooDeep {
-    /// 1-based line of the token that went over.
-    pub line: u32,
-    pub message: String,
-}
-
-/// The first point, in source order, where bracket nesting goes deeper than
-/// [`MAX_NESTING`]; `None` if it never does.
+/// The 1-based line on which bracket nesting first goes deeper than `limit`;
+/// `None` if it never does.
 ///
 /// Mirrors `syn::parse_file`'s prologue: a BOM is ignored, and a `#!` first
 /// line may or may not be a shebang that `syn` drops, so both readings are
 /// checked. A text that does not lex is not too deep: `syn` lexes it the same
 /// way and fails before parsing anything.
-pub fn too_deep_at(src: &str) -> Option<TooDeep> {
+pub fn first_line_deeper_than(src: &str, limit: usize) -> Option<u32> {
     let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let without_first_line = src
         .starts_with("#!")
         .then(|| src.find('\n').map_or("", |newline| &src[newline..]));
-    first_too_deep(src)
-        .or_else(|| without_first_line.and_then(first_too_deep))
-        .map(|line| TooDeep {
-            line,
-            message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
-        })
+    first_too_deep(src, limit).or_else(|| without_first_line.and_then(|rest| first_too_deep(rest, limit)))
 }
 
-/// [`too_deep_at`] for one reading of the text: one pass over the token tree
-/// with an explicit stack of groups, stopping at the first group opened past
-/// the cap.
-fn first_too_deep(text: &str) -> Option<u32> {
+/// [`first_line_deeper_than`] for one reading of the text: one pass over the
+/// token tree with an explicit stack of groups, stopping at the first group
+/// opened past `limit`.
+fn first_too_deep(text: &str, limit: usize) -> Option<u32> {
     let tokens: TokenStream = text.parse().ok()?;
     let mut stack: Vec<token_stream::IntoIter> = vec![tokens.into_iter()];
     while let Some(frame) = stack.last_mut() {
@@ -72,7 +56,7 @@ fn first_too_deep(text: &str) -> Option<u32> {
         };
         if let TokenTree::Group(group) = token {
             // The stack holds the top level plus every open group.
-            if stack.len() > MAX_NESTING {
+            if stack.len() > limit {
                 return Some(group.span_open().start().line as u32);
             }
             stack.push(group.stream().into_iter());
@@ -85,8 +69,10 @@ fn first_too_deep(text: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    const MAX_NESTING: usize = 100;
+
     fn line_of(src: &str) -> Option<u32> {
-        too_deep_at(src).map(|too_deep| too_deep.line)
+        first_line_deeper_than(src, MAX_NESTING)
     }
 
     fn parens(depth: usize) -> String {

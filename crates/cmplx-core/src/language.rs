@@ -1,6 +1,6 @@
 //! The `Language` trait, per-language option plumbing, and the language registry.
 
-use crate::model::{Func, ParseError};
+use crate::model::{Func, ParseError, ParseErrorKind};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -59,7 +59,46 @@ pub trait Language: Sync {
     fn stdin_ext(&self) -> &'static str;
     fn options(&self) -> &'static [OptionSpec];
     fn skip(&self, path: &Path, opts: &LangOptions) -> bool;
+    /// The 1-based line on which `(`, `[` and `{` first nest deeper than
+    /// `limit` levels, or `None` if they never do. Brackets inside strings,
+    /// chars, comments and other literals do not count. One iterative pass
+    /// that stops at that line, so any depth is safe to scan.
+    fn first_line_deeper_than(
+        &self,
+        src: &str,
+        path: &Path,
+        opts: &LangOptions,
+        limit: usize,
+    ) -> Option<u32>;
+    /// Score `src`. Core calls this only after [`Self::first_line_deeper_than`]
+    /// found nothing deeper than [`MAX_NESTING`] (see [`analyze_bounded`]), so
+    /// it may recurse on bracket nesting up to that depth.
     fn analyze(&self, src: &str, path: &Path, opts: &LangOptions) -> Result<Vec<Func>, ParseError>;
+}
+
+/// Deepest bracket nesting any language scores. Deeper code is refused before
+/// it is analyzed: it cannot crash a recursive parser, and it is far past
+/// anything a person should maintain.
+pub const MAX_NESTING: usize = 100;
+
+/// Refuse `src` if its brackets nest deeper than [`MAX_NESTING`], else have
+/// `lang` analyze it. Every caller in core scores through this.
+pub fn analyze_bounded(
+    lang: &dyn Language,
+    src: &str,
+    path: &Path,
+    opts: &LangOptions,
+) -> Result<Vec<Func>, ParseError> {
+    match lang.first_line_deeper_than(src, path, opts, MAX_NESTING) {
+        Some(line) => Err(ParseError {
+            line,
+            message: format!(
+                "nesting deeper than {MAX_NESTING} levels; this code needs restructuring"
+            ),
+            kind: ParseErrorKind::TooDeep { limit: MAX_NESTING },
+        }),
+        None => lang.analyze(src, path, opts),
+    }
 }
 
 pub type Lang = &'static dyn Language;
@@ -138,6 +177,9 @@ mod tests {
         fn skip(&self, _: &Path, _: &LangOptions) -> bool {
             false
         }
+        fn first_line_deeper_than(&self, _: &str, _: &Path, _: &LangOptions, _: usize) -> Option<u32> {
+            None
+        }
         fn analyze(&self, _: &str, _: &Path, _: &LangOptions) -> Result<Vec<Func>, ParseError> {
             Ok(vec![])
         }
@@ -160,6 +202,89 @@ mod tests {
             o.set(k, *v);
         }
         o
+    }
+
+    /// Nests by `(` and `)` anywhere in the text; `analyze` scores one
+    /// function per call and panics on a line of 101 or more `(`, so a test
+    /// fails loudly if the guard ever lets such a text through.
+    struct Parens;
+    impl Language for Parens {
+        fn id(&self) -> &'static str {
+            "parens"
+        }
+        fn display_name(&self) -> &'static str {
+            "Parens"
+        }
+        fn alias(&self) -> Option<&'static str> {
+            None
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["pa"]
+        }
+        fn stdin_ext(&self) -> &'static str {
+            "pa"
+        }
+        fn options(&self) -> &'static [OptionSpec] {
+            &[]
+        }
+        fn skip(&self, _: &Path, _: &LangOptions) -> bool {
+            false
+        }
+        fn first_line_deeper_than(&self, src: &str, _: &Path, _: &LangOptions, limit: usize) -> Option<u32> {
+            let mut depth = 0usize;
+            for (i, line) in src.lines().enumerate() {
+                for c in line.chars() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    if depth > limit {
+                        return Some(i as u32 + 1);
+                    }
+                }
+            }
+            None
+        }
+        fn analyze(&self, src: &str, _: &Path, _: &LangOptions) -> Result<Vec<Func>, ParseError> {
+            assert!(!src.contains(&"(".repeat(MAX_NESTING + 1)), "analyze saw a too-deep text");
+            Ok(vec![Func {
+                name: "f".into(),
+                kind: crate::model::Kind { id: "fn", label: "fn" },
+                line: 1,
+                complexity: 1,
+                depth: 0,
+                points: vec![],
+            }])
+        }
+    }
+
+    fn bounded(src: &str) -> Result<Vec<Func>, ParseError> {
+        analyze_bounded(&Parens, src, Path::new("a.pa"), &LangOptions::default())
+    }
+
+    #[test]
+    fn the_nesting_cap_is_one_hundred_levels() {
+        assert_eq!(MAX_NESTING, 100);
+    }
+
+    #[test]
+    fn nesting_at_the_cap_is_analyzed() {
+        let src = format!("{}{}", "(".repeat(MAX_NESTING), ")".repeat(MAX_NESTING));
+        assert_eq!(bounded(&src).map(|funcs| funcs.len()), Ok(1));
+    }
+
+    #[test]
+    fn nesting_past_the_cap_is_refused_by_core_at_the_line_it_is_first_exceeded() {
+        let src = format!("x\n{}\n{}", "(".repeat(60), "(".repeat(41));
+        assert_eq!(
+            bounded(&src),
+            Err(ParseError {
+                line: 3,
+                message: "nesting deeper than 100 levels; this code needs restructuring".into(),
+                kind: ParseErrorKind::TooDeep { limit: 100 },
+            })
+        );
     }
 
     #[test]

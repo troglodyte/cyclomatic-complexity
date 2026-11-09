@@ -36,8 +36,6 @@ const TESTS: OptionSpec = OptionSpec {
 
 static OPTIONS: [OptionSpec; 3] = [LOGICAL, QUESTION, TESTS];
 
-pub use nesting::MAX_NESTING;
-
 pub struct Rust;
 pub static RUST: Rust = Rust;
 
@@ -87,6 +85,9 @@ impl Language for Rust {
     fn skip(&self, _path: &Path, _opts: &LangOptions) -> bool {
         false
     }
+    fn first_line_deeper_than(&self, src: &str, _path: &Path, _opts: &LangOptions, limit: usize) -> Option<u32> {
+        nesting::first_line_deeper_than(src, limit)
+    }
     fn analyze(&self, src: &str, _path: &Path, opts: &LangOptions) -> Result<Vec<Func>, ParseError> {
         let options = analyze::Options {
             logical: opts.flag(&LOGICAL).unwrap_or(true),
@@ -94,7 +95,11 @@ impl Language for Rust {
             tests: opts.flag(&TESTS).unwrap_or(true),
         };
         let result = on_parse_stack(|| {
-            let result = analyze_bounded(src, options);
+            let result = analyze::analyze(src, options).map_err(|e| ParseError {
+                line: e.line,
+                message: e.message,
+                kind: ParseErrorKind::Syntax,
+            });
             // Every span is already a line number, so the thread-local span
             // table (which otherwise keeps each parsed file's text alive) can
             // be dropped, on whichever thread parsed. Callers of
@@ -106,9 +111,9 @@ impl Language for Rust {
     }
 }
 
-/// Stack for the thread `syn` parses on, so that [`MAX_NESTING`] fits with a
-/// wide margin whatever thread calls `analyze` (see the measurements on
-/// [`MAX_NESTING`]). Only the pages a parse touches are committed.
+/// Stack for the thread `syn` parses on, so that core's 100-level nesting cap
+/// fits with a wide margin whatever thread calls `analyze` (see the
+/// measurements in `nesting`). Only the pages a parse touches are committed.
 const PARSE_STACK_BYTES: usize = 16 << 20;
 
 /// Run `parse` on a thread with a [`PARSE_STACK_BYTES`] stack and wait for it.
@@ -128,28 +133,18 @@ fn on_parse_stack<T: Send>(parse: impl Fn() -> T + Sync) -> T {
     })
 }
 
-/// Refuse a file nested too deeply for `syn` (see `nesting`), else analyze it.
-fn analyze_bounded(src: &str, options: analyze::Options) -> Result<Vec<analyze::Func>, ParseError> {
-    if let Some(too_deep) = nesting::too_deep_at(src) {
-        return Err(ParseError {
-            line: too_deep.line,
-            message: too_deep.message,
-            kind: ParseErrorKind::TooDeep,
-        });
-    }
-    analyze::analyze(src, options).map_err(|e| ParseError {
-        line: e.line,
-        message: e.message,
-        kind: ParseErrorKind::Syntax,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cmplx_core::language::{analyze_bounded, MAX_NESTING};
 
+    /// Score as core does: refused past the nesting cap, else analyzed.
     fn analyze_with(src: &str, opts: &LangOptions) -> Result<Vec<Func>, ParseError> {
-        RUST.analyze(src, Path::new("a.rs"), opts)
+        analyze_bounded(&RUST, src, Path::new("a.rs"), opts)
+    }
+
+    fn deeper_than_cap(src: &str) -> Option<u32> {
+        RUST.first_line_deeper_than(src, Path::new("a.rs"), &LangOptions::default(), MAX_NESTING)
     }
 
     #[test]
@@ -227,15 +222,15 @@ mod tests {
         assert_eq!(funcs.unwrap().len(), 1);
     }
 
-    /// Closures passed as arguments use the most stack per delimiter level
-    /// measured (see `MAX_NESTING`): too much for 64 levels on a 2 MB stack in
-    /// a debug build, which is why the parse gets its own thread.
+    /// Closures use the most stack per delimiter level measured (see
+    /// `nesting`): far too much for 100 levels on a 2 MB stack in a debug
+    /// build, which is why the parse gets its own thread.
     #[test]
     fn the_costliest_nesting_measured_at_the_cap_scores_normally_on_a_2mb_stack() {
-        let levels = (MAX_NESTING - 2) / 2;
-        let src = format!("fn f() {{ {}(1){} }}", "g(|| { ".repeat(levels), " })".repeat(levels));
-        assert_eq!(nesting::too_deep_at(&src), None);
-        assert!(nesting::too_deep_at(&format!("({src})")).is_some(), "the input is at the cap");
+        let levels = MAX_NESTING - 1;
+        let src = format!("fn f() {{ {}1{} }}", "let _ = || { ".repeat(levels), " };".repeat(levels));
+        assert_eq!(deeper_than_cap(&src), None);
+        assert!(deeper_than_cap(&format!("({src})")).is_some(), "the input is at the cap");
         let funcs = on_small_stack(move || analyze_with(&src, &LangOptions::default()));
         assert_eq!(funcs.unwrap().len(), levels + 1);
     }
@@ -243,15 +238,10 @@ mod tests {
     #[test]
     fn nesting_one_past_the_cap_is_refused_at_the_line_it_first_exceeds() {
         let src = format!("\n\n{}", nested_parens(MAX_NESTING + 1));
+        assert_eq!(deeper_than_cap(&src), Some(3));
         let err = analyze_with(&src, &LangOptions::default()).unwrap_err();
-        assert_eq!(
-            err,
-            ParseError {
-                line: 3,
-                message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
-                kind: ParseErrorKind::TooDeep,
-            }
-        );
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, ParseErrorKind::TooDeep { limit: MAX_NESTING });
     }
 
     #[test]

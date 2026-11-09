@@ -74,6 +74,12 @@ fn jsx_default(extension: &str) -> bool {
     !matches!(extension, "ts" | "mts" | "cts")
 }
 
+/// Whether to lex `path` as JSX: the `jsx` option, else by extension.
+fn jsx_for(path: &Path, opts: &LangOptions) -> bool {
+    opts.flag(&JSX)
+        .unwrap_or_else(|| jsx_default(&extension_of(path)))
+}
+
 impl Language for Js {
     fn id(&self) -> &'static str {
         "js"
@@ -103,10 +109,29 @@ impl Language for Js {
                 name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
             })
     }
+    /// Brackets counted on the lexer's tokens, so strings, template text,
+    /// regexes, comments and JSX text are already out of the way. A closer
+    /// with no opener is ignored. Template `${` substitutions are not tokens
+    /// and do not count; brackets inside them do.
+    fn first_line_deeper_than(&self, src: &str, path: &Path, opts: &LangOptions, limit: usize) -> Option<u32> {
+        let mut depth = 0usize;
+        for token in lexer::lex(src, jsx_for(path, opts)) {
+            if token.kind != lexer::Kind::Punct {
+                continue;
+            }
+            match token.text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                _ => continue,
+            }
+            if depth > limit {
+                return Some(token.line);
+            }
+        }
+        None
+    }
     fn analyze(&self, src: &str, path: &Path, opts: &LangOptions) -> Result<Vec<Func>, ParseError> {
-        let jsx = opts
-            .flag(&JSX)
-            .unwrap_or_else(|| jsx_default(&extension_of(path)));
+        let jsx = jsx_for(path, opts);
         let options = analyze::Options {
             logical: opts.flag(&LOGICAL).unwrap_or(true),
             optional_chain: opts.flag(&OPTIONAL_CHAIN).unwrap_or(false),
@@ -121,6 +146,8 @@ impl Language for Js {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cmplx_core::language::{analyze_bounded, MAX_NESTING};
+    use cmplx_core::model::ParseErrorKind;
 
     fn analyze_as(src: &str, name: &str, opts: &LangOptions) -> Vec<Func> {
         JS.analyze(src, Path::new(name), opts).unwrap()
@@ -211,6 +238,94 @@ mod tests {
         let default = analyze_as(src, "a.js", &LangOptions::default());
         let off = analyze_as(src, "a.js", &opts_with("logical", false));
         assert_eq!((default[0].complexity, off[0].complexity), (2, 1));
+    }
+
+    fn deeper_than_cap(src: &str, name: &str) -> Option<u32> {
+        JS.first_line_deeper_than(src, Path::new(name), &LangOptions::default(), MAX_NESTING)
+    }
+
+    /// `function f() {` is one level and each `(` inside adds one.
+    fn nested_parens(depth: usize) -> String {
+        let inner = depth - 1;
+        format!("function f() {{ x = {}1{}; }}", "(".repeat(inner), ")".repeat(inner))
+    }
+
+    #[test]
+    fn nesting_exactly_at_the_cap_is_analyzed() {
+        let src = nested_parens(MAX_NESTING);
+        assert_eq!(deeper_than_cap(&src, "a.js"), None);
+        let funcs = analyze_bounded(&JS, &src, Path::new("a.js"), &LangOptions::default());
+        assert_eq!(funcs.map(|f| f.len()), Ok(1));
+    }
+
+    #[test]
+    fn nesting_one_past_the_cap_is_refused_at_the_line_it_first_exceeds() {
+        let src = format!("\n\n{}", nested_parens(MAX_NESTING + 1));
+        assert_eq!(deeper_than_cap(&src, "a.js"), Some(3));
+        let err = analyze_bounded(&JS, &src, Path::new("a.js"), &LangOptions::default()).unwrap_err();
+        assert_eq!((err.line, err.kind), (3, ParseErrorKind::TooDeep { limit: MAX_NESTING }));
+    }
+
+    #[test]
+    fn all_three_brackets_count() {
+        let open = "([{".repeat(MAX_NESTING / 3 + 1);
+        let close: String = open
+            .chars()
+            .rev()
+            .map(|c| match c {
+                '(' => ')',
+                '[' => ']',
+                _ => '}',
+            })
+            .collect();
+        assert_eq!(deeper_than_cap(&format!("x = {open}{close};"), "a.js"), Some(1));
+        assert_eq!(deeper_than_cap("x = ([{}]);", "a.js"), None);
+    }
+
+    #[test]
+    fn nesting_100k_deep_is_refused_quickly_without_overflowing_a_2mb_stack() {
+        let started = std::time::Instant::now();
+        let err = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| analyze_bounded(&JS, &nested_parens(100_000), Path::new("a.js"), &LangOptions::default()))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(err.map_err(|e| e.line), Err(1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn brackets_in_strings_comments_templates_and_regexes_do_not_count() {
+        let deep = "([{".repeat(MAX_NESTING);
+        // A `[` outside a class would open one, so the plain regex has none.
+        let groups = "({".repeat(MAX_NESTING);
+        let src = format!(
+            "function f() {{\n\
+             // {deep}\n\
+             /* {deep} */\n\
+             a = '{deep}';\n\
+             b = \"{deep}\";\n\
+             c = `{deep}`;\n\
+             d = /{groups}/;\n\
+             e = /[{deep}]/g;\n\
+             }}"
+        );
+        assert_eq!(deeper_than_cap(&src, "a.js"), None);
+    }
+
+    #[test]
+    fn brackets_inside_a_template_substitution_count() {
+        let src = format!("x = `${{{}1{}}}`;", "(".repeat(MAX_NESTING + 1), ")".repeat(MAX_NESTING + 1));
+        assert_eq!(deeper_than_cap(&src, "a.js"), Some(1));
+    }
+
+    #[test]
+    fn jsx_text_brackets_do_not_count_but_jsx_expression_braces_do() {
+        let text = format!("const a = <p>{}</p>;", "(".repeat(MAX_NESTING * 2));
+        assert_eq!(deeper_than_cap(&text, "a.jsx"), None);
+        let exprs = format!("const a = <p>{}x{}</p>;", "{(".repeat(MAX_NESTING), ")}".repeat(MAX_NESTING));
+        assert_eq!(deeper_than_cap(&exprs, "a.jsx"), Some(1));
     }
 
     /// Analyze `src` on a thread with Rust's default 2 MB spawned-thread stack.

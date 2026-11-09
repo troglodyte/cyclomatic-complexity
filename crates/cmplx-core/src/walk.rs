@@ -213,6 +213,9 @@ mod tests {
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with("skipme."))
         }
+        fn first_line_deeper_than(&self, _: &str, _: &Path, _: &LangOptions, _: usize) -> Option<u32> {
+            None
+        }
         fn analyze(&self, _: &str, _: &Path, _: &LangOptions) -> Result<Vec<Func>, ParseError> {
             Ok(vec![])
         }
