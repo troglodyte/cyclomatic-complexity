@@ -6,6 +6,7 @@
 use crate::cli::{parse_args, Cli};
 use crate::config::FileConfig;
 use crate::language::{Lang, Registry};
+use crate::model::ParseErrorKind;
 use crate::report::{self, Filter, Row, Style, Summary};
 use crate::walk::{self, Scope};
 use std::fs;
@@ -294,9 +295,18 @@ fn score_into(
             true
         }
         Err(e) => {
-            warn(format!("{name}:{}: parse error: {}", e.line, e.message));
+            warn(format!("{name}:{}: {}: {}", e.line, failure_label(e.kind), e.message));
             false
         }
+    }
+}
+
+/// How a file that could not be parsed is described: a syntax error is a
+/// parse error; a file refused as too deep was never parsed, only not scored.
+fn failure_label(kind: ParseErrorKind) -> &'static str {
+    match kind {
+        ParseErrorKind::Syntax => "parse error",
+        ParseErrorKind::TooDeep => "not scored",
     }
 }
 
@@ -386,6 +396,13 @@ mod tests {
                         line: line_no,
                         message: "bad".into(),
                         kind: ParseErrorKind::Syntax,
+                    });
+                }
+                if line == "deep" {
+                    return Err(ParseError {
+                        line: line_no,
+                        message: "too deeply nested to score (> 2 levels)".into(),
+                        kind: ParseErrorKind::TooDeep,
                     });
                 }
                 if line == "ext?" {
@@ -604,6 +621,20 @@ mod tests {
         let out = execute_with(&both(), &[&bad, &good], "");
         assert_eq!(out.code, 2);
         assert_eq!(out.stderr, format!("cmplx: {bad}:2: parse error: bad\n"));
+        assert!(out.stdout.contains("g\n"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
+    fn a_too_deep_file_is_worded_as_not_scored_and_the_rest_is_still_scored() {
+        let dir = temp_dir("too-deep-file");
+        let deep = file(&dir, "deep.rs", "f 1\ndeep\n");
+        let good = file(&dir, "good.rs", "g 1\n");
+        let out = execute_with(&both(), &[&deep, &good], "");
+        assert_eq!(out.code, 2);
+        assert_eq!(
+            out.stderr,
+            format!("cmplx: {deep}:2: not scored: too deeply nested to score (> 2 levels)\n")
+        );
         assert!(out.stdout.contains("g\n"), "got:\n{}", out.stdout);
     }
 

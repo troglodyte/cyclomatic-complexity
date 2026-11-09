@@ -106,6 +106,27 @@ fn an_unparseable_file_warns_and_exits_two_without_stopping() {
 }
 
 #[test]
+fn a_too_deeply_nested_file_is_reported_as_not_scored() {
+    let dir = temp_dir("too-deep");
+    let deep = dir.join("deep.rs");
+    let depth = cmplx_rust::MAX_NESTING + 1;
+    std::fs::write(&deep, format!("fn f() {{\n{}{};\n}}\n", "(".repeat(depth), ")".repeat(depth))).unwrap();
+    std::fs::write(dir.join("ok.rs"), "fn g(a: bool) { if a { } }").unwrap();
+
+    let (stdout, stderr, code) = rustcx(&[dir.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        stderr,
+        format!(
+            "rustcx: {}:2: not scored: too deeply nested to score (> {} levels)\n",
+            deep.display(),
+            cmplx_rust::MAX_NESTING
+        )
+    );
+    assert!(stdout.contains("g"), "the good file must still be scored:\n{stdout}");
+}
+
+#[test]
 fn stdin_is_read_with_a_dash() {
     use std::io::Write;
     use std::process::Stdio;
