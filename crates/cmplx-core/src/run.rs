@@ -93,7 +93,9 @@ fn serve_lsp(program: &'static str, reg: &Registry) -> ExitCode {
 /// stdio ends it early; that is reported on stderr, since stdout is the protocol.
 fn serve_worker(program: &'static str, reg: &Registry) -> ExitCode {
     let (stdin, stdout, stderr) = (io::stdin(), io::stdout(), io::stderr());
-    match worker::serve(reg, &mut stdin.lock(), &mut stdout.lock(), &mut stderr.lock()) {
+    // Buffered: a response is written a function at a time and flushed whole.
+    let mut out = io::BufWriter::new(stdout.lock());
+    match worker::serve(reg, &mut stdin.lock(), &mut out, &mut stderr.lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{program}: {WORKER_FLAG}: {e}");

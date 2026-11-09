@@ -140,16 +140,15 @@ fn serve_with_cap(
     max_text: u64,
 ) -> io::Result<()> {
     loop {
-        let response = match read_line_capped(input, MAX_REQUEST_BYTES)? {
+        match read_line_capped(input, MAX_REQUEST_BYTES)? {
             Line::Eof => return Ok(()),
             // A last request without `\n` is still a whole request.
-            Line::Text(line) | Line::Unterminated(line) => respond(reg, &line, max_text),
+            Line::Text(line) | Line::Unterminated(line) => respond(reg, &line, max_text, out)?,
             Line::TooLong => {
                 let message = format!("request longer than {} bytes", MAX_REQUEST_BYTES);
                 return write_line(out, &invalid(Value::Null, &message));
             }
         };
-        write_line(out, &response)?;
         err.write_all(&[RESPONSE_MARKER])?;
         err.flush()?;
     }
@@ -160,22 +159,34 @@ fn write_line(out: &mut impl Write, response: &Value) -> io::Result<()> {
     out.flush()
 }
 
-/// The response to one request line.
-fn respond(reg: &Registry, line: &[u8], max_text: u64) -> Value {
+/// Answer one request line on `out`.
+fn respond(reg: &Registry, line: &[u8], max_text: u64, out: &mut impl Write) -> io::Result<()> {
     let request: Value = match serde_json::from_slice(line) {
         Ok(request) => request,
-        Err(e) => return invalid(Value::Null, &format!("request is not JSON: {e}")),
+        Err(e) => return write_line(out, &invalid(Value::Null, &format!("request is not JSON: {e}"))),
     };
     let (id, lang, path, text, opts) = match parse_request(reg, &request, max_text) {
         Ok(parsed) => parsed,
-        Err(refusal) => return refusal,
+        Err(refusal) => return write_line(out, &refusal),
     };
     match analyze_bounded(lang, text, Path::new(path), &opts) {
-        Ok(funcs) => {
-            json!({ "id": id, "functions": funcs.iter().map(func_json).collect::<Vec<_>>() })
-        }
-        Err(e) => json!({ "id": id, "error": error_json(&e) }),
+        Ok(funcs) => write_functions(out, id, &funcs),
+        Err(e) => write_line(out, &json!({ "id": id, "error": error_json(&e) })),
     }
+}
+
+/// `{"id":…,"functions":[…]}` and a newline, written one function at a time,
+/// so a large file's response is never held whole as a `Value`.
+fn write_functions(out: &mut impl Write, id: u64, funcs: &[Func]) -> io::Result<()> {
+    write!(out, "{{\"id\":{id},\"functions\":[")?;
+    for (i, f) in funcs.iter().enumerate() {
+        if i > 0 {
+            out.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *out, &func_json(f)).map_err(io::Error::other)?;
+    }
+    out.write_all(b"]}\n")?;
+    out.flush()
 }
 
 /// A usable request's id, language, path, text and options. `Err` is the
@@ -655,6 +666,22 @@ mod tests {
             intern(&"k".repeat(65)),
             Err("a name longer than 64 bytes".to_string())
         );
+    }
+
+    #[test]
+    fn a_streamed_response_is_one_line_of_the_same_json() {
+        let text: String = (0..50).map(|i| format!("f{i} {i}\n")).collect();
+        let mut out = Vec::new();
+        serve(&reg(), &mut request(4, &text, &LangOptions::default()).as_bytes(), &mut out, &mut io::sink())
+            .unwrap();
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 1);
+        let funcs = FAKE.analyze(&text, Path::new("dir/a.fk"), &LangOptions::default()).unwrap();
+        let expected = json!({ "id": 4, "functions": funcs.iter().map(func_json).collect::<Vec<_>>() });
+        assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), expected);
+        let empty = request(5, "", &LangOptions::default());
+        let mut out = Vec::new();
+        serve(&reg(), &mut empty.as_bytes(), &mut out, &mut io::sink()).unwrap();
+        assert_eq!(out, b"{\"id\":5,\"functions\":[]}\n");
     }
 
     #[test]
