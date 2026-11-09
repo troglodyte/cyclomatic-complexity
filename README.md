@@ -404,6 +404,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p cmplx -- --explain crates/cmplx-js/fixtures
 ```
 
+The tests need [`jq`](https://jqlang.org) on `PATH`: `hook_compat` runs the
+Claude Code hook's jq filter over the binaries' `--json` output, and fails
+loudly (`install jq to run hook_compat`) rather than skipping when jq is missing.
+
 `tests/golden/` holds output recorded from the pre-merge tools; it is historical
 and is never regenerated (see its README). The fixtures under
 `crates/cmplx-*/fixtures/` are hand-checked samples whose expected scores the

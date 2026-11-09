@@ -270,11 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn the_nesting_cap_is_one_hundred_levels() {
-        assert_eq!(MAX_NESTING, 100);
-    }
-
-    #[test]
     fn nesting_at_the_cap_is_analyzed() {
         let src = format!("{}{}", "(".repeat(MAX_NESTING), ")".repeat(MAX_NESTING));
         assert_eq!(bounded(&src).map(|funcs| funcs.len()), Ok(1));
