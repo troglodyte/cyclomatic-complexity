@@ -36,7 +36,10 @@ const TESTS: OptionSpec = OptionSpec {
 
 static OPTIONS: [OptionSpec; 3] = [LOGICAL, QUESTION, TESTS];
 
-pub use nesting::MAX_NESTING;
+pub use nesting::{
+    MAX_CHAIN_OPERATORS, MAX_ELSE_IF_CHAIN, MAX_EXPRESSION_HEADS, MAX_FN_ARROWS, MAX_GENERIC_DEPTH,
+    MAX_NESTING, MAX_PREFIX_OPERATORS,
+};
 
 pub struct Rust;
 pub static RUST: Rust = Rust;
@@ -128,12 +131,12 @@ fn on_parse_stack<T: Send>(parse: impl Fn() -> T + Sync) -> T {
     })
 }
 
-/// Refuse a file nested deeper than [`MAX_NESTING`], else analyze it.
+/// Refuse a file nested too deeply for `syn` (see `nesting`), else analyze it.
 fn analyze_bounded(src: &str, options: analyze::Options) -> Result<Vec<analyze::Func>, ParseError> {
-    if let Some(line) = nesting::too_deep_at(src) {
+    if let Some(too_deep) = nesting::too_deep_at(src) {
         return Err(ParseError {
-            line,
-            message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
+            line: too_deep.line,
+            message: too_deep.message,
             kind: ParseErrorKind::TooDeep,
         });
     }
@@ -277,6 +280,163 @@ mod tests {
         );
         let funcs = analyze_with(&src, &LangOptions::default());
         assert_eq!(funcs.map(|f| f.len()), Ok(1));
+    }
+
+    /// One non-bracket recursion `syn` has, as a source with exactly `n` of it.
+    struct Chain {
+        cap: usize,
+        what: &'static str,
+        src: fn(usize) -> String,
+    }
+
+    fn chains() -> [Chain; 6] {
+        [
+            Chain {
+                cap: MAX_PREFIX_OPERATORS,
+                what: "prefix operators in a row",
+                src: |n| format!("type T = {}u8;", "&".repeat(n)),
+            },
+            Chain {
+                cap: MAX_GENERIC_DEPTH,
+                what: "levels of generics",
+                src: |n| format!("type T = {}u8{};", "Vec<".repeat(n), ">".repeat(n)),
+            },
+            Chain {
+                cap: MAX_FN_ARROWS,
+                what: "levels of `->` types",
+                src: |n| format!("type T = {}u8;", "fn() -> ".repeat(n)),
+            },
+            Chain {
+                cap: MAX_EXPRESSION_HEADS,
+                what: "nested closures, ranges, assignments, returns or breaks",
+                src: |n| format!("fn f() {{ {}x; }}", "|a| ".repeat(n)),
+            },
+            Chain {
+                cap: MAX_CHAIN_OPERATORS,
+                what: "operators in one expression",
+                src: |n| format!("fn f() {{ a{}; }}", " + a".repeat(n)),
+            },
+            Chain {
+                cap: MAX_ELSE_IF_CHAIN,
+                what: "branches in one else-if chain",
+                src: |n| format!("fn f() {{ if a {{}} {} }}", "else if a {} ".repeat(n)),
+            },
+        ]
+    }
+
+    #[test]
+    fn each_chain_at_its_cap_scores_normally() {
+        for chain in chains() {
+            let src = (chain.src)(chain.cap);
+            let result = on_small_stack(move || analyze_with(&src, &LangOptions::default()));
+            assert!(result.is_ok(), "{}: {result:?}", chain.what);
+        }
+    }
+
+    #[test]
+    fn each_chain_one_past_its_cap_is_refused_naming_what_was_too_deep() {
+        for chain in chains() {
+            let src = format!("\n{}", (chain.src)(chain.cap + 1));
+            let err = analyze_with(&src, &LangOptions::default()).unwrap_err();
+            assert_eq!(
+                (err.line, err.kind, err.message),
+                (
+                    2,
+                    ParseErrorKind::TooDeep,
+                    format!("too deeply nested to score (> {} {})", chain.cap, chain.what)
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn each_chain_a_million_long_is_refused_quickly_without_a_crash() {
+        for chain in chains() {
+            let started = std::time::Instant::now();
+            let src = (chain.src)(1_000_000);
+            let err = on_small_stack(move || analyze_with(&src, &LangOptions::default()));
+            assert_eq!(err.map_err(|e| e.kind), Err(ParseErrorKind::TooDeep), "{}", chain.what);
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "{}: {:?}", chain.what, started.elapsed());
+        }
+    }
+
+    /// Every other construct that recursed in the measurements is caught by one
+    /// of the counters; none may reach `syn` at a length that overflows.
+    #[test]
+    fn every_measured_recursion_is_refused_at_its_overflow_length() {
+        let shapes: [(&str, usize, String); 27] = [
+            ("while", 1_299, format!("fn f() {{ let _ = {}x{}; }}", "while ".repeat(1_299), " {}".repeat(1_299))),
+            ("if", 1_138, format!("fn f() {{ let _ = {}x{}; }}", "if ".repeat(1_138), " {} else {}".repeat(1_138))),
+            ("match", 1_357, format!("fn f() {{ let _ = {}x{}; }}", "match ".repeat(1_357), " {}".repeat(1_357))),
+            ("for", 1_167, format!("fn f() {{ let _ = {}x{}; }}", "for a in ".repeat(1_167), " {}".repeat(1_167))),
+            ("if let", 620, format!("fn f() {{ let _ = {}x{}; }}", "if let a = ".repeat(620), " {} else {}".repeat(620))),
+            ("while let", 664, format!("fn f() {{ let _ = {}x{}; }}", "while let a = ".repeat(664), " {}".repeat(664))),
+            ("binding", 5_502, format!("fn f() {{ let {}x = y; }}", "a @ ".repeat(5_502))),
+            ("deref", 3_956, format!("fn f() {{ let _ = {}x; }}", "*".repeat(3_956))),
+            ("not", 3_956, format!("fn f() {{ let _ = {}x; }}", "!".repeat(3_956))),
+            ("neg", 3_956, format!("fn f() {{ let _ = {}x; }}", "- ".repeat(3_956))),
+            ("ref mut", 5_802, format!("fn f() {{ let _ = {}x; }}", "&mut ".repeat(5_802))),
+            ("ptr type", 451, format!("type T = {}u8;", "*const ".repeat(451))),
+            ("lifetime ref", 450, format!("type T = {}u8;", "&'a ".repeat(450))),
+            ("ref pattern", 7_575, format!("fn f() {{ let {}x = y; }}", "& ".repeat(7_575))),
+            ("box pattern", 7_575, format!("fn f() {{ let {}x = y; }}", "box ".repeat(7_575))),
+            ("turbofish", 287, format!("fn f() {{ g::{}u8{}(); }}", "<Vec".repeat(287), ">".repeat(287))),
+            ("qself", 405, format!("type T = {}T{};", "<".repeat(405), " as A>::B".repeat(405))),
+            ("impl Fn", 362, format!("fn f() -> {}u8 {{}}", "impl Fn() -> ".repeat(362))),
+            ("closure", 966, format!("fn f() {{ let _ = {}x; }}", "|| ".repeat(966))),
+            ("range", 1_414, format!("fn f() {{ let _ = {}a; }}", ".. ".repeat(1_414))),
+            ("break", 1_387, format!("fn f() {{ loop {{ {}x; }} }}", "break ".repeat(1_387))),
+            ("return", 1_563, format!("fn f() {{ {}x; }}", "return ".repeat(1_563))),
+            ("assign", 1_963, format!("fn f() {{ {}a; }}", "a = ".repeat(1_963))),
+            ("call", 26_227, format!("fn f() {{ a{}; }}", "()".repeat(26_227))),
+            ("method", 26_900, format!("fn f() {{ a{}; }}", ".f()".repeat(26_900))),
+            ("try", 28_354, format!("fn f() {{ a{}; }}", "?".repeat(28_354))),
+            ("let chain", 24_396, format!("fn f() {{ if {}true {{}} }}", "let a = b && ".repeat(24_396))),
+        ];
+        for (name, _, src) in shapes {
+            let err = analyze_with(&src, &LangOptions::default());
+            assert_eq!(err.map_err(|e| e.kind), Err(ParseErrorKind::TooDeep), "{name}");
+        }
+    }
+
+    /// Several kinds of nesting together use more stack than any one alone, so
+    /// they share a budget of twice one cap: four kinds at a third of their
+    /// caps pass, and at three-fifths are refused.
+    #[test]
+    fn a_mix_of_nestings_shares_one_budget() {
+        let mixed = |share: fn(usize) -> usize| {
+            format!(
+                "fn f() {{ {}{}{}x{}{}; }}",
+                "(".repeat(share(MAX_NESTING)),
+                "|a| ".repeat(share(MAX_EXPRESSION_HEADS)),
+                "&".repeat(share(MAX_PREFIX_OPERATORS)),
+                " + a".repeat(share(MAX_CHAIN_OPERATORS)),
+                ")".repeat(share(MAX_NESTING)),
+            )
+        };
+        let third = mixed(|cap| cap / 3);
+        assert!(on_small_stack(move || analyze_with(&third, &LangOptions::default())).is_ok());
+        let err = analyze_with(&mixed(|cap| cap * 3 / 5), &LangOptions::default()).unwrap_err();
+        assert_eq!(err.kind, ParseErrorKind::TooDeep);
+        assert_eq!(err.message, "too deeply nested to score (several kinds of nesting together)");
+    }
+
+    /// Ordinary code that is long but not deep must still be scored.
+    #[test]
+    fn long_but_shallow_files_are_not_refused() {
+        let derives = "#[derive(Debug, Clone)]\nstruct S { a: Vec<u8>, b: Option<&'static str> }\n".repeat(3_000);
+        let comparisons = format!("fn f(a: u8, b: u8) {{ {} }}", "if a < b { g(); } ".repeat(3_000));
+        let guards = format!(
+            "fn f(x: u8, y: u8) -> u8 {{ match x {{ {} _ => 0 }} }}",
+            "1 if x < y => 1, ".repeat(3_000)
+        );
+        let arms = format!("fn f(x: u8) {{ match x {{ {} _ => {{}} }} }}", "1 => {} ".repeat(30_000));
+        let items = "fn f() -> impl Fn() -> u8 { || 0 }\n".repeat(3_000);
+        let statements = format!("fn f() {{ {} }}", "let a = &mut *b..c; return; ".repeat(3_000));
+        for src in [derives, comparisons, guards, arms, items, statements] {
+            let result = analyze_with(&src, &LangOptions::default());
+            assert!(result.is_ok(), "{:?}: {}", result.map(|f| f.len()), &src[..80]);
+        }
     }
 
     // proc-macro2's span table is private, so invalidation cannot be observed
