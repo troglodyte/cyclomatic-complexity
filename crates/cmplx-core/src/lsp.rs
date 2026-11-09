@@ -224,8 +224,14 @@ impl<W: Write> Server<W> {
     /// is nothing to say.
     fn hover(&self, params: &Value) -> Value {
         let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
-        // LSP positions are 0-based; Func.line is 1-based.
-        let line = params["position"]["line"].as_u64().unwrap_or(0) as u32 + 1;
+        // LSP positions are 0-based; Func.line is 1-based. A line no u32 can
+        // number has no function on it.
+        let Some(line) = u32::try_from(params["position"]["line"].as_u64().unwrap_or(0))
+            .ok()
+            .and_then(|l| l.checked_add(1))
+        else {
+            return Value::Null;
+        };
         match self.docs.get(uri).and_then(|d| hover_at(&d.funcs, line)) {
             Some(text) => json!({ "contents": { "kind": "markdown", "value": text } }),
             None => Value::Null,
@@ -701,6 +707,27 @@ mod tests {
         let params = json!({ "rootUri": null, "initializationOptions": options });
         server.request("initialize", json!(1), &params).unwrap();
         sent(server);
+    }
+
+    fn hover_line(server: &Server<Vec<u8>>, line: u64) -> Value {
+        server.hover(&json!({
+            "textDocument": { "uri": "file:///x/a.fk" },
+            "position": { "line": line, "character": 0 },
+        }))
+    }
+
+    #[test]
+    fn hovering_a_line_beyond_any_function_line_number_answers_null() {
+        let mut s = server();
+        initialize(&mut s, Value::Null);
+        open(&mut s, "file:///x/a.fk", "f 3\n");
+        assert_ne!(hover_line(&s, 0), Value::Null, "line 0 is f");
+        assert_eq!(hover_line(&s, u64::from(u32::MAX)), Value::Null);
+        assert_eq!(
+            hover_line(&s, u64::from(u32::MAX) + 1),
+            Value::Null,
+            "must not wrap round to line 0"
+        );
     }
 
     #[test]
