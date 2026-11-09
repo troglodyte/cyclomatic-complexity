@@ -7,8 +7,9 @@
 //! One worker serves one request at a time. When it dies, closes its output,
 //! answers nonsense or takes longer than the timeout, it is killed and reaped,
 //! the source in flight fails with [`ParseErrorKind::Crashed`], and the next
-//! source starts a fresh worker, up to a restart limit. If no worker can be
-//! started at all, the supervisor says so once and scores in process.
+//! source starts a fresh worker, up to a restart limit. If the first worker
+//! cannot be started, the supervisor says so once and scores in process; a
+//! restart that cannot be started fails its source, and counts as a restart.
 //!
 //! Generic over languages: it names none, and sends each source to the
 //! worker under its language's id.
@@ -193,11 +194,22 @@ impl Supervisor {
         let mut worker = match self.take_worker(&config) {
             Ok(worker) => worker,
             Err(Unavailable::GaveUp) => return Err(crashed(lang, CrashReason::GaveUp, &config)),
-            Err(Unavailable::Spawn(e)) => {
+            // No worker has ever started, so none will: say so once and
+            // score in process from now on.
+            Err(Unavailable::Spawn(e)) if self.spawned == 0 => {
                 self.warnings
                     .push(format!("running without crash protection: {e}"));
                 self.mode = Mode::InProcess;
                 return analyze_bounded(lang, src, path, opts);
+            }
+            // A restart failed. Scoring in process now would drop protection
+            // exactly when an analyzer is crashing, so fail this source and
+            // let the restart limit decide about the next.
+            Err(Unavailable::Spawn(e)) => {
+                let reason = CrashReason::SpawnFailed {
+                    error: e.to_string(),
+                };
+                return Err(crashed(lang, reason, &config));
             }
         };
         self.next_id += 1;
@@ -282,6 +294,9 @@ fn crash_message(lang: &str, reason: &CrashReason, config: &SupervisorConfig) ->
         }
         CrashReason::BadResponse { detail } => {
             format!("not scored: the {lang} analyzer sent a bad response: {detail}")
+        }
+        CrashReason::SpawnFailed { error } => {
+            format!("not scored: the {lang} analyzer could not be restarted: {error}")
         }
         CrashReason::GaveUp => match config.restarts {
             RestartLimit::PerRun { max } => {
@@ -944,6 +959,53 @@ mod tests {
             warnings[0]
         );
         assert_eq!(supervisor.spawned(), 0);
+    }
+
+    /// A worker that deletes its own executable, then crashes: the restart
+    /// after it cannot be spawned.
+    #[cfg(unix)]
+    fn self_deleting_worker() -> SupervisorConfig {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "cmplx-supervisor-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("worker.sh");
+        std::fs::write(&exe, "#!/bin/sh\nrm -f \"$0\"\nread -r line\nexit 3\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        SupervisorConfig {
+            command: Some(vec![exe.into_os_string()]),
+            ..fake("")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restart_fails_the_source_and_keeps_protection_on() {
+        let mut supervisor = Supervisor::new(self_deleting_worker());
+        assert!(matches!(reason(score(&mut supervisor, "x")), CrashReason::Exited { .. }));
+        let error = score(&mut supervisor, "x").unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("not scored: the Fake analyzer could not be restarted: "),
+            "{}",
+            error.message
+        );
+        assert!(matches!(reason(Err(error)), CrashReason::SpawnFailed { .. }));
+        assert!(supervisor.take_warnings().is_empty(), "no fallback to in-process");
+        for _ in 0..2 {
+            assert!(matches!(reason(score(&mut supervisor, "x")), CrashReason::SpawnFailed { .. }));
+        }
+        assert_eq!(
+            reason(score(&mut supervisor, "x")),
+            CrashReason::GaveUp,
+            "failed restarts count against the cap of 3"
+        );
     }
 
     #[cfg(unix)]

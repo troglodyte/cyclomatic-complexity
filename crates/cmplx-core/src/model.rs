@@ -66,6 +66,8 @@ pub enum CrashReason {
     Exited { termination: Termination, stderr: String },
     /// It answered with something that is not a response to the request.
     BadResponse { detail: String },
+    /// A worker crashed before, and a new one could not be started.
+    SpawnFailed { error: String },
     /// It crashed too often, so it was not started again for this source.
     GaveUp,
 }

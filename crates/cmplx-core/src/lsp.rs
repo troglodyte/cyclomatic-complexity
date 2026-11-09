@@ -296,12 +296,19 @@ impl<W: Write> Server<W> {
     }
 
     /// Log a crash and publish it as one warning on line 0. Every crash but
-    /// a paused restart is remembered against this exact text, so that
+    /// a paused or failed restart is remembered against this exact text, so that
     /// re-sending it (a save, an undo) does not crash another worker.
     fn crashed(&mut self, uri: &str, text: &str, fingerprint: u64, error: ParseError) -> io::Result<()> {
         self.log(&format!("{uri}: {}", error.message))?;
         let message = error.message.clone();
-        if !matches!(error.kind, ParseErrorKind::Crashed { reason: CrashReason::GaveUp }) {
+        // A paused or failed restart says nothing about this text.
+        let about_the_text = !matches!(
+            error.kind,
+            ParseErrorKind::Crashed {
+                reason: CrashReason::GaveUp | CrashReason::SpawnFailed { .. }
+            }
+        );
+        if about_the_text {
             self.crashed.insert(uri.to_string(), Crash { fingerprint, error });
         }
         self.publish_crash(uri, text, &message)
