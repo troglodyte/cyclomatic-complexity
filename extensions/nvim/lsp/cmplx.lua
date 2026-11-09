@@ -2,11 +2,11 @@
 --- `vim.lsp.enable("cmplx")`; see extensions/nvim/README.md.
 local binary = require("cmplx.binary")
 
-local MARKERS = { "Cargo.toml", "package.json", "tsconfig.json", "jsconfig.json", ".git" }
+local ROOT_MARKERS = { "Cargo.toml", "package.json", "tsconfig.json", "jsconfig.json", ".git" }
 
 local NOT_FOUND = table.concat({
   "cmplx not found on PATH or in ~/.cargo/bin. Install it with",
-  "'cargo install --path .', or point at it with",
+  "'cargo install --path crates/cmplx' from the repository root, or point at it with",
   'vim.lsp.config("cmplx", { cmd = { "/path/to/cmplx", "--lsp" } }).',
 }, "\n")
 
@@ -17,6 +17,9 @@ end
 
 return {
   cmd = { exe or binary.EXECUTABLE, "--lsp" },
+  -- Exposed for tests and for `vim.lsp.config` users; `root_dir` below is what
+  -- Neovim actually consults.
+  root_markers = ROOT_MARKERS,
   filetypes = { "javascript", "javascriptreact", "typescript", "typescriptreact", "rust" },
   -- No `init_options` key on purpose. An absent threshold is what lets
   -- cmplx.toml apply; sending a default here would override the file in every
@@ -30,6 +33,6 @@ return {
     if not exe then
       return
     end
-    on_dir(vim.fs.root(bufnr, MARKERS) or vim.fn.getcwd())
+    on_dir(vim.fs.root(bufnr, ROOT_MARKERS) or vim.fn.getcwd())
   end,
 }

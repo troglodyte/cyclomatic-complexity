@@ -4,7 +4,7 @@ Cyclomatic complexity diagnostics and hover from `cmplx --lsp`. Requires
 Neovim 0.11 or newer and the `cmplx` binary:
 
 ```console
-cargo install --path crates/cmplx
+cargo install --path crates/cmplx   # from the repository root
 ```
 
 ## Install

@@ -39,7 +39,7 @@ impl zed::Extension for CmplxExtension {
             .or_else(|| cargo_bin(worktree))
             .ok_or_else(|| {
                 "cmplx was not found on PATH or in ~/.cargo/bin. Install it with \
-                 'cargo install --path crates/cmplx' in this repository's crates/cmplx directory."
+                 'cargo install --path crates/cmplx' from the repository root."
                     .to_string()
             })?;
 

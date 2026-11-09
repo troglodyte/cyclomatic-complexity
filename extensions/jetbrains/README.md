@@ -9,7 +9,7 @@ set — all scoring lives in the cmplx server, shared with the other extensions.
 
 ## Requirements
 
-- The `cmplx` binary: `cargo install --path crates/cmplx./..`
+- The `cmplx` binary: `cargo install --path ../../crates/cmplx`
 - A paid JetBrains IDE, 2026.2 or newer. The IntelliJ LSP API does not exist in
   IDEA Community or Android Studio. See `pluginSinceBuild` in
   `gradle.properties` for what it would take to support older IDEs.

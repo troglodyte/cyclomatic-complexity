@@ -113,6 +113,13 @@ check(
     { "javascript", "javascriptreact", "typescript", "typescriptreact", "rust" }
   )
 )
+check(
+  "config roots on JS, TS and Rust project markers",
+  vim.deep_equal(
+    config.root_markers,
+    { "Cargo.toml", "package.json", "tsconfig.json", "jsconfig.json", ".git" }
+  )
+)
 check("config passes --lsp to the binary", config.cmd[2] == "--lsp")
 check("config resolves a command name", type(config.cmd[1]) == "string" and config.cmd[1] ~= "")
 check("config exposes root_dir as a predicate", type(config.root_dir) == "function")
