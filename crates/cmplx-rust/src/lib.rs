@@ -1,6 +1,7 @@
 //! Rust support for cmplx: rustcx's syn-based analyzer behind `Language`.
 
 pub mod analyze;
+mod nesting;
 
 use cmplx_core::language::{LangOptions, Language, OptionSpec};
 use cmplx_core::model::{Func, Kind, ParseError, Point};
@@ -34,6 +35,8 @@ const TESTS: OptionSpec = OptionSpec {
 };
 
 static OPTIONS: [OptionSpec; 3] = [LOGICAL, QUESTION, TESTS];
+
+pub use nesting::MAX_NESTING;
 
 pub struct Rust;
 pub static RUST: Rust = Rust;
@@ -90,14 +93,54 @@ impl Language for Rust {
             question: opts.flag(&QUESTION).unwrap_or(false),
             tests: opts.flag(&TESTS).unwrap_or(true),
         };
-        let result = analyze::analyze(src, options);
-        // Every span is already a line number, so the thread-local span table
-        // (which otherwise keeps each parsed file's text alive) can be dropped.
-        // Callers of `Language::analyze` cannot reach proc-macro2 themselves.
-        proc_macro2::extra::invalidate_current_thread_spans();
+        let result = on_parse_stack(|| {
+            let result = analyze_bounded(src, options);
+            // Every span is already a line number, so the thread-local span
+            // table (which otherwise keeps each parsed file's text alive) can
+            // be dropped, on whichever thread parsed. Callers of
+            // `Language::analyze` cannot reach proc-macro2 themselves.
+            proc_macro2::extra::invalidate_current_thread_spans();
+            result
+        });
         result
             .map(|funcs| funcs.into_iter().map(core_func).collect())
             .map_err(|e| ParseError { line: e.line, message: e.message })
+    }
+}
+
+/// Stack for the thread `syn` parses on, so that [`MAX_NESTING`] fits with a
+/// wide margin whatever thread calls `analyze` (see the measurements on
+/// [`MAX_NESTING`]). Only the pages a parse touches are committed.
+const PARSE_STACK_BYTES: usize = 16 << 20;
+
+/// Run `parse` on a thread with a [`PARSE_STACK_BYTES`] stack and wait for it.
+/// If no thread can be started it runs on the caller's: the cap still holds
+/// there, with the smaller margin of the caller's stack. A panic is passed on
+/// unchanged.
+fn on_parse_stack<T: Send>(parse: impl Fn() -> T + Sync) -> T {
+    std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .name("cmplx-rust-parse".into())
+            .stack_size(PARSE_STACK_BYTES)
+            .spawn_scoped(scope, &parse);
+        match spawned {
+            Ok(handle) => handle.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
+            Err(_) => parse(),
+        }
+    })
+}
+
+/// Refuse a file nested deeper than [`MAX_NESTING`], else analyze it.
+fn analyze_bounded(
+    src: &str,
+    options: analyze::Options,
+) -> Result<Vec<analyze::Func>, analyze::ParseError> {
+    match nesting::too_deep_at(src) {
+        Some(line) => Err(analyze::ParseError {
+            line,
+            message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
+        }),
+        None => analyze::analyze(src, options),
     }
 }
 
@@ -158,6 +201,80 @@ mod tests {
         let default_score = analyze_with(src, &LangOptions::default()).unwrap()[0].complexity;
         let off_score = analyze_with(src, &off).unwrap()[0].complexity;
         assert_eq!((default_score, off_score), (3, 2));
+    }
+
+    /// A file whose deepest delimiter nesting is `depth`: `fn f() {` is one
+    /// level and each `(` inside the expression adds one.
+    fn nested_parens(depth: usize) -> String {
+        let inner = depth - 1;
+        format!("fn f() {{ let _ = {}1{}; }}", "(".repeat(inner), ")".repeat(inner))
+    }
+
+    /// Run `f` on a thread with Rust's default 2 MB spawned-thread stack.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn nesting_exactly_at_the_cap_scores_normally_on_a_2mb_stack() {
+        let funcs = on_small_stack(|| analyze_with(&nested_parens(MAX_NESTING), &LangOptions::default()));
+        assert_eq!(funcs.unwrap().len(), 1);
+    }
+
+    /// Closures passed as arguments use the most stack per delimiter level
+    /// measured (see `MAX_NESTING`): too much for 64 levels on a 2 MB stack in
+    /// a debug build, which is why the parse gets its own thread.
+    #[test]
+    fn the_costliest_nesting_measured_at_the_cap_scores_normally_on_a_2mb_stack() {
+        let levels = (MAX_NESTING - 2) / 2;
+        let src = format!("fn f() {{ {}(1){} }}", "g(|| { ".repeat(levels), " })".repeat(levels));
+        assert_eq!(nesting::too_deep_at(&src), None);
+        assert!(nesting::too_deep_at(&format!("({src})")).is_some(), "the input is at the cap");
+        let funcs = on_small_stack(move || analyze_with(&src, &LangOptions::default()));
+        assert_eq!(funcs.unwrap().len(), levels + 1);
+    }
+
+    #[test]
+    fn nesting_one_past_the_cap_is_refused_at_the_line_it_first_exceeds() {
+        let src = format!("\n\n{}", nested_parens(MAX_NESTING + 1));
+        let err = analyze_with(&src, &LangOptions::default()).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError {
+                line: 3,
+                message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
+            }
+        );
+    }
+
+    #[test]
+    fn nesting_100k_deep_is_refused_quickly_without_overflowing_a_2mb_stack() {
+        let started = std::time::Instant::now();
+        let err = on_small_stack(|| analyze_with(&nested_parens(100_000), &LangOptions::default()));
+        assert_eq!(err.unwrap_err().line, 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn delimiters_inside_literals_and_comments_do_not_count() {
+        let deep = "(".repeat(MAX_NESTING * 2);
+        let src = format!(
+            "fn f() {{\n\
+             // {deep}\n\
+             /* {deep} /* nested */ {deep} */\n\
+             let _ = \"{deep}\";\n\
+             let _ = r#\"{deep}\"#;\n\
+             let _ = b\"{deep}\";\n\
+             let _ = ['(', '[', '{{'];\n\
+             }}"
+        );
+        let funcs = analyze_with(&src, &LangOptions::default());
+        assert_eq!(funcs.map(|f| f.len()), Ok(1));
     }
 
     // proc-macro2's span table is private, so invalidation cannot be observed
