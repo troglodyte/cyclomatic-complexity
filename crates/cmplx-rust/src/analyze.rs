@@ -5,7 +5,6 @@
 //! listing can never disagree.
 
 use proc_macro2::Span;
-use serde::Serialize;
 use syn::visit::{self, Visit};
 
 /// Which constructs count as decision points.
@@ -25,8 +24,7 @@ impl Default for Options {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FnKind {
     Fn,
     Method,
@@ -47,13 +45,13 @@ impl FnKind {
 }
 
 /// One decision point, for `--explain`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Point {
     pub line: u32,
     pub branch: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Func {
     pub name: String,
     pub kind: FnKind,
