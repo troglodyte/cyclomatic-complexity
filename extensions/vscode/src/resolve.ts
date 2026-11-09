@@ -29,7 +29,7 @@ export function realEnv(): ResolveEnv {
 }
 
 /**
- * Locate the `rustcx` executable: the configured path, then `PATH`, then Cargo's
+ * Locate the `cmplx` executable: the configured path, then `PATH`, then Cargo's
  * bin directory.
  *
  * The Cargo fallback is not redundant. A VS Code launched from the Dock or the
@@ -57,7 +57,7 @@ function child(windows: boolean, dir: string, ...rest: string[]): string {
 }
 
 export function resolveBinary(configured: string, env: ResolveEnv): string | undefined {
-  const name = env.windows ? "rustcx.exe" : "rustcx";
+  const name = env.windows ? "cmplx.exe" : "cmplx";
 
   const explicit = configured.trim();
   if (explicit.length > 0) {
