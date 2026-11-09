@@ -120,8 +120,13 @@ fn execute<R: Read, W: Write, E: Write>(
         top: cli.top,
         sort: cli.sort,
     };
+    // The gate sees every scored function, not just the ones --min/--top show.
+    let over = report::over_limit(&rows, config.max);
     let rows = report::select(rows, &filter);
-    let summary = report::summarize(&rows, config.max);
+    let summary = Summary {
+        over,
+        ..report::summarize(&rows, config.max)
+    };
     match render(out, &rows, &summary, cli) {
         // A closed pipe (`cmplx . | head`) is the reader's choice, not a failure.
         Err(e) if e.kind() != io::ErrorKind::BrokenPipe => {
@@ -475,6 +480,25 @@ mod tests {
             "got:\n{}",
             out.stdout
         );
+    }
+
+    #[test]
+    fn the_max_gate_counts_rows_that_min_and_top_hide() {
+        let dir = temp_dir("max-unfiltered");
+        let path = file(&dir, "a.rs", "f 5\ng 4\nh 1\n");
+        let out = execute_with(&both(), &["--min", "30", "--max", "3", &path], "");
+        assert_eq!(out.code, 1, "{}", out.stdout);
+        assert!(
+            out.stdout.ends_with("0 functions in 0 files\n2 functions above the limit of 3\n"),
+            "got:\n{}",
+            out.stdout
+        );
+
+        let out = execute_with(&both(), &["--top", "1", "-j", "--max", "3", &path], "");
+        assert_eq!(out.code, 1);
+        let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(v["summary"]["functions"], 1, "the summary describes the shown rows");
+        assert_eq!(v["summary"]["overLimit"], 2, "the gate counts every row");
     }
 
     #[test]

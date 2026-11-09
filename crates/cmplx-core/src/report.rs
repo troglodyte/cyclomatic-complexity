@@ -19,7 +19,8 @@ pub struct Row {
     pub func: Func,
 }
 
-/// Totals over the rows being reported.
+/// Totals over the rows being reported, except `over`, which the run counts
+/// over every scored function so `--min`/`--top` cannot hide a gate failure.
 #[derive(Clone)]
 pub struct Summary {
     pub funcs: usize,
@@ -28,8 +29,13 @@ pub struct Summary {
     pub worst: Option<Row>,
     /// The `--max` in force, if any.
     pub max: Option<u32>,
-    /// Functions scoring above `max`; 0 when `max` is unset.
+    /// Functions scoring above `max` (see [`over_limit`]); 0 when `max` is unset.
     pub over: usize,
+}
+
+/// How many of `rows` score above `max`; 0 when `max` is unset.
+pub fn over_limit(rows: &[Row], max: Option<u32>) -> usize {
+    max.map_or(0, |m| rows.iter().filter(|r| r.func.complexity > m).count())
 }
 
 pub fn summarize(rows: &[Row], max: Option<u32>) -> Summary {
@@ -43,7 +49,7 @@ pub fn summarize(rows: &[Row], max: Option<u32>) -> Summary {
         f64::from(total) / rows.len() as f64
     };
     let worst = rows.iter().max_by_key(|r| r.func.complexity).cloned();
-    let over = max.map_or(0, |m| rows.iter().filter(|r| r.func.complexity > m).count());
+    let over = over_limit(rows, max);
     Summary {
         funcs: rows.len(),
         files: files.len(),
