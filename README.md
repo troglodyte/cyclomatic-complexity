@@ -229,8 +229,13 @@ tests = true
 ```
 
 A per-language table may override a shared key (`[rust] logical = false`). An
-unknown key is an error, not a shrug. The server re-reads the file whenever it
-changes, so a new threshold applies without a restart.
+unknown key is an error, not a shrug, for `cmplx`. An alias such as `jscx`
+cannot tell a typo from a key that belongs to a language it does not include,
+so it ignores the key and prints a warning naming it, such as
+``jscx: /repo/cmplx.toml: ignoring unknown key `question` ``. The language
+server writes the same warning to its log. The server re-reads the file it found at startup whenever that
+file changes, so a new threshold applies without a restart. A config file
+created after the server started is not picked up until it restarts.
 
 `rustcx.toml` is still read as a fallback when no `cmplx.toml` is found, and
 only for Rust. Its keys are top-level (`max`, `threshold`, `question`,
@@ -251,7 +256,7 @@ editor and build-script setups keep working.
 `cmplx --lsp` speaks LSP over stdio. It publishes a warning for every function
 at or above the threshold (default 11) and an error at twice it, and answers
 hover on a function's signature line, or on any line it was charged a point for,
-with the decision points behind the score. It re-reads `cmplx.toml` on change and
+with the decision points behind the score. It re-reads its `cmplx.toml` on change and
 skips files the active languages skip (such as `.d.ts`). A buffer that does not
 parse keeps its last diagnostics, and the failure is written to the server log.
 
@@ -319,7 +324,8 @@ language-servers = ["rust-analyzer", "cmplx"]
 - **Branches outside a function are not scored** (`const`/`static` initializers,
   array lengths).
 - **The server analyzes one document at a time**, and a panic ends the process
-  (`panic = "abort"`); editors restart a dead language server.
+  (`panic = "abort"`). Some editors restart a dead language server; others,
+  such as Neovim, leave it stopped until you restart it.
 
 ## Development
 
