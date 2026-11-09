@@ -400,3 +400,93 @@ fn an_alias_warns_once_per_config_key_it_ignores_and_still_runs() {
         )
     );
 }
+
+/// A Rust file that overflows the Rust analyzer's parse stack, in debug and
+/// release builds alike: closures nested 3000 deep with no bracket between
+/// them, so the nesting cap does not catch it.
+fn stack_overflowing_rust() -> String {
+    format!("fn f() {{ let _ = {}x; }}\n", "|a, b| ".repeat(3000))
+}
+
+const STACK_OVERFLOW: &str =
+    "not scored: the Rust analyzer crashed (stack overflow); the file is probably nested too deeply to analyze";
+
+/// Run `program` in `dir` and return its output.
+fn run_program_in(program: &str, dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(bin(program))
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .args(args)
+        .output()
+        .expect("run the binary")
+}
+
+#[cfg(unix)]
+#[test]
+fn the_overflowing_file_crashes_an_unsupervised_analyzer() {
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+
+    let request = serde_json::json!({
+        "id": 1, "lang": "rust", "path": "bad.rs", "text": stack_overflowing_rust(), "options": {}
+    });
+    let mut worker = Command::new(bin("cmplx"))
+        .arg("--worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the worker");
+    let mut stdin = worker.stdin.take().unwrap();
+    writeln!(stdin, "{request}").unwrap();
+    drop(stdin);
+    let out = worker.wait_with_output().unwrap();
+    assert_eq!(out.status.signal(), Some(6), "the in-process baseline aborts: {:?}", out.status);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("has overflowed its stack"));
+}
+
+#[test]
+fn a_stack_overflow_in_one_file_is_reported_and_the_run_goes_on() {
+    let dir = temp_dir("overflow-cmplx");
+    std::fs::write(dir.join("bad.rs"), stack_overflowing_rust()).unwrap();
+    std::fs::write(dir.join("good.ts"), TS_SOURCE).unwrap();
+
+    let out = run_program_in("cmplx", &dir, &["bad.rs", "good.ts"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(2), "exit 2, not an abort: {:?}\n{stderr}", out.status);
+    assert_eq!(stderr, format!("cmplx: bad.rs: {STACK_OVERFLOW}\n"));
+    assert!(stdout.contains("pick"), "good.ts is scored:\n{stdout}");
+    assert!(stdout.contains("1 function in 1 file"), "{stdout}");
+}
+
+#[test]
+fn rustcx_reports_a_stack_overflow_and_scores_the_rest() {
+    let dir = temp_dir("overflow-rustcx");
+    std::fs::write(dir.join("bad.rs"), stack_overflowing_rust()).unwrap();
+    std::fs::write(dir.join("good.rs"), RUST_SOURCE).unwrap();
+
+    let out = run_program_in("rustcx", &dir, &["bad.rs", "good.rs"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(2), "{:?}\n{stderr}", out.status);
+    assert_eq!(stderr, format!("rustcx: bad.rs: {STACK_OVERFLOW}\n"));
+    assert!(stdout.contains("gate"), "good.rs is scored:\n{stdout}");
+}
+
+#[test]
+fn a_stack_overflow_on_stdin_is_reported_too() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(bin("rustcx"))
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rustcx");
+    child.stdin.take().unwrap().write_all(stack_overflowing_rust().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), format!("rustcx: <stdin>: {STACK_OVERFLOW}\n"));
+}

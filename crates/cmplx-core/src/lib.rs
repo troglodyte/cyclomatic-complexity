@@ -7,6 +7,7 @@ pub mod lsp;
 pub mod model;
 pub mod report;
 pub mod run;
+pub mod supervisor;
 pub mod walk;
 pub mod worker;
 

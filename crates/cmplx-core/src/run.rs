@@ -5,9 +5,10 @@
 
 use crate::cli::{parse_args, Cli};
 use crate::config::FileConfig;
-use crate::language::{analyze_bounded, Lang, Registry};
+use crate::language::{Lang, Registry};
 use crate::model::{ParseError, ParseErrorKind};
 use crate::report::{self, Filter, Row, Style, Summary};
+use crate::supervisor::{Supervisor, SupervisorConfig};
 use crate::walk::{self, Scope};
 use crate::worker::{self, WORKER_FLAG};
 use std::fs;
@@ -51,10 +52,16 @@ pub fn run(program: &'static str, reg: Registry) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Dropped before returning, which stops the worker.
+    let mut supervisor = Supervisor::new(SupervisorConfig::cli());
+    let mut scorer = Scorer {
+        config: &config,
+        supervisor: &mut supervisor,
+    };
     let code = execute(
         &cli,
         &reg,
-        &config,
+        &mut scorer,
         &mut io::stdin().lock(),
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -116,24 +123,32 @@ fn resolve(cli: &Cli, start: &Path, reg: &Registry) -> Result<(FileConfig, Vec<S
     Ok((apply(cli, file), warnings))
 }
 
+/// What scores a source: the resolved settings, and the supervisor whose
+/// worker does the analysis.
+struct Scorer<'a> {
+    config: &'a FileConfig,
+    supervisor: &'a mut Supervisor,
+}
+
 /// Score stdin and the paths, print the report, and return the exit code.
-/// Warnings go to `err`; a failed path or parse does not stop the run.
+/// Warnings go to `err`; a failed path, parse or analyzer crash does not stop
+/// the run.
 fn execute<R: Read, W: Write, E: Write>(
     cli: &Cli,
     reg: &Registry,
-    config: &FileConfig,
+    scorer: &mut Scorer,
     stdin: &mut R,
     out: &mut W,
     err: &mut E,
 ) -> u8 {
-    execute_with_cap(cli, reg, config, stdin, out, err, MAX_FILE_BYTES)
+    execute_with_cap(cli, reg, scorer, stdin, out, err, MAX_FILE_BYTES)
 }
 
 /// [`execute`] with sources capped at `max_bytes` rather than [`MAX_FILE_BYTES`].
 fn execute_with_cap<R: Read, W: Write, E: Write>(
     cli: &Cli,
     reg: &Registry,
-    config: &FileConfig,
+    scorer: &mut Scorer,
     stdin: &mut R,
     out: &mut W,
     err: &mut E,
@@ -149,7 +164,7 @@ fn execute_with_cap<R: Read, W: Write, E: Write>(
         match read_capped(stdin, None, max_bytes) {
             Ok(bytes) => {
                 let src = String::from_utf8_lossy(&bytes);
-                ok &= score_stdin(&mut rows, cli, config, &src, &mut warn);
+                ok &= score_stdin(&mut rows, cli, scorer, &src, &mut warn);
             }
             Err(ReadFailure::TooLarge) => {
                 warn(too_large(STDIN_NAME, max_bytes));
@@ -161,7 +176,8 @@ fn execute_with_cap<R: Read, W: Write, E: Write>(
             }
         }
     }
-    ok &= score_files(&mut rows, cli, reg, config, max_bytes, &mut warn);
+    ok &= score_files(&mut rows, cli, reg, scorer, max_bytes, &mut warn);
+    let config = scorer.config;
 
     let filter = Filter {
         min: cli.min,
@@ -190,14 +206,14 @@ fn execute_with_cap<R: Read, W: Write, E: Write>(
 fn score_stdin(
     rows: &mut Vec<Row>,
     cli: &Cli,
-    config: &FileConfig,
+    scorer: &mut Scorer,
     src: &str,
     warn: &mut impl FnMut(String),
 ) -> bool {
     let lang = cli.active[0];
     let ext = cli.ext.as_deref().unwrap_or(lang.stdin_ext());
     let path = PathBuf::from(format!("{STDIN_NAME}.{ext}"));
-    score_into(rows, STDIN_NAME, &path, lang, src, config, warn)
+    score_into(rows, STDIN_NAME, &path, lang, src, scorer, warn)
 }
 
 /// Score every file named or found under the command-line paths. Returns false
@@ -206,7 +222,7 @@ fn score_files(
     rows: &mut Vec<Row>,
     cli: &Cli,
     reg: &Registry,
-    config: &FileConfig,
+    scorer: &mut Scorer,
     max_bytes: u64,
     warn: &mut impl FnMut(String),
 ) -> bool {
@@ -214,7 +230,7 @@ fn score_files(
         reg,
         active: &cli.active,
         explicit_lang: cli.explicit_lang,
-        config,
+        config: scorer.config,
     };
     let expanded = walk::expand(&cli.paths, &scope);
     let mut ok = expanded.problems.is_empty();
@@ -224,7 +240,7 @@ fn score_files(
         match read_file_capped(&source.path, max_bytes) {
             Ok(bytes) => {
                 let src = String::from_utf8_lossy(&bytes);
-                ok &= score_into(rows, &name, &source.path, source.lang, &src, config, warn);
+                ok &= score_into(rows, &name, &source.path, source.lang, &src, scorer, warn);
             }
             Err(ReadFailure::TooLarge) => {
                 warn(too_large(&name, max_bytes));
@@ -290,18 +306,21 @@ pub(crate) fn size_label(bytes: u64) -> String {
     }
 }
 
-/// Analyze one source and append its rows. Returns false on a parse error,
-/// which is reported as a warning naming the file.
+/// Analyze one source and append its rows. Returns false on a parse error or
+/// an analyzer crash, which is reported as a warning naming the file.
 fn score_into(
     rows: &mut Vec<Row>,
     name: &str,
     path: &Path,
     lang: Lang,
     src: &str,
-    config: &FileConfig,
+    scorer: &mut Scorer,
     warn: &mut impl FnMut(String),
 ) -> bool {
-    match analyze_bounded(lang, src, path, &config.options_for(lang)) {
+    let opts = scorer.config.options_for(lang);
+    let result = scorer.supervisor.analyze(lang, src, path, &opts);
+    scorer.supervisor.take_warnings().into_iter().for_each(&mut *warn);
+    match result {
         Ok(funcs) => {
             rows.extend(funcs.into_iter().map(|func| Row {
                 file: name.to_string(),
@@ -359,6 +378,7 @@ mod tests {
     use crate::config::FileConfig;
     use crate::language::{LangOptions, Language, OptionSpec, Registry};
     use crate::model::{Func, Kind, ParseError, ParseErrorKind};
+    use crate::supervisor::{Supervisor, SupervisorConfig};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -492,16 +512,30 @@ mod tests {
         execute_capped(reg, list, stdin, MAX_FILE_BYTES)
     }
 
-    /// `execute`, with files and stdin capped at `max_bytes`.
-    fn execute_capped(reg: &Registry, list: &[&str], mut stdin: &[u8], max_bytes: u64) -> Outcome {
+    /// `execute`, with files and stdin capped at `max_bytes`, scored in process.
+    fn execute_capped(reg: &Registry, list: &[&str], stdin: &[u8], max_bytes: u64) -> Outcome {
+        execute_supervised(reg, list, stdin, max_bytes, &mut Supervisor::in_process())
+    }
+
+    fn execute_supervised(
+        reg: &Registry,
+        list: &[&str],
+        mut stdin: &[u8],
+        max_bytes: u64,
+        supervisor: &mut Supervisor,
+    ) -> Outcome {
         colored::control::set_override(false);
         let cli = parse(reg, list);
         let config = apply(&cli, FileConfig::default());
         let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut scorer = Scorer {
+            config: &config,
+            supervisor,
+        };
         let code = execute_with_cap(
             &cli,
             reg,
-            &config,
+            &mut scorer,
             &mut stdin,
             &mut out,
             &mut err,
@@ -653,6 +687,72 @@ mod tests {
             format!("cmplx: {deep}:2: nesting deeper than 100 levels; this code needs restructuring\n")
         );
         assert!(out.stdout.contains("g\n"), "got:\n{}", out.stdout);
+    }
+
+    /// A worker that answers every request with no functions, unless it
+    /// holds `CRASH`, which makes it print `boom` and exit 3.
+    fn crashing_worker() -> Supervisor {
+        let script = r#"
+            while IFS= read -r line; do
+                case "$line" in *CRASH*) echo boom >&2; exit 3;; esac
+                id=${line#\{\"id\":}; id=${id%%,*}
+                printf '{"id":%s,"functions":[{"name":"w","kind":{"id":"fn","label":"fn"},"line":1,"complexity":1,"depth":0,"points":[]}]}\n' "$id"
+            done
+        "#;
+        Supervisor::new(SupervisorConfig {
+            command: Some(vec!["sh".into(), "-c".into(), script.into()]),
+            timeout: std::time::Duration::from_secs(5),
+            restarts: crate::supervisor::RestartLimit::PerRun { max: 10 },
+        })
+    }
+
+    #[test]
+    fn files_and_stdin_are_scored_through_the_supervisor() {
+        let dir = temp_dir("supervised");
+        let path = file(&dir, "a.rs", "f 1\n");
+        let mut supervisor = crashing_worker();
+        let out = execute_supervised(&both(), &["--json", &path], b"", MAX_FILE_BYTES, &mut supervisor);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(v["functions"][0]["name"], "w", "the worker's answer, not the in-process one");
+
+        let out = execute_supervised(&both(), &["--js", "-", "--json"], b"f 1\n", MAX_FILE_BYTES, &mut supervisor);
+        let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+        assert_eq!(v["functions"][0]["name"], "w");
+    }
+
+    #[test]
+    fn a_crash_fails_only_its_file_names_it_and_exits_two() {
+        let dir = temp_dir("crash");
+        let bad = file(&dir, "bad.rs", "CRASH\n");
+        let good = file(&dir, "good.rs", "g 1\n");
+        let out = execute_supervised(&both(), &[&bad, &good], b"", MAX_FILE_BYTES, &mut crashing_worker());
+        assert_eq!(out.code, 2);
+        assert_eq!(
+            out.stderr,
+            format!("cmplx: {bad}: not scored: the Fake analyzer crashed (exit code 3): boom\n")
+        );
+        assert!(out.stdout.contains("1 function in 1 file"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
+    fn a_worker_that_cannot_start_warns_once_and_scores_in_process() {
+        let dir = temp_dir("no-worker");
+        let a = file(&dir, "a.rs", "f 1\n");
+        let b = file(&dir, "b.rs", "g 1\n");
+        let mut supervisor = Supervisor::new(SupervisorConfig {
+            command: Some(vec!["/nonexistent/cmplx-worker".into()]),
+            ..SupervisorConfig::cli()
+        });
+        let out = execute_supervised(&both(), &[&a, &b], b"", MAX_FILE_BYTES, &mut supervisor);
+        assert_eq!(out.code, 0);
+        assert!(
+            out.stderr.starts_with("cmplx: running without crash protection: ")
+                && out.stderr.lines().count() == 1,
+            "got: {}",
+            out.stderr
+        );
+        assert!(out.stdout.contains("2 functions in 2 files"), "got:\n{}", out.stdout);
     }
 
     #[test]
