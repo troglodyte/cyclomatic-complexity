@@ -273,6 +273,22 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_matches_extensions_whatever_their_case() {
+        let root = temp_dir("ext-case");
+        touch(&root, "Y.JS");
+        touch(&root, "z.Rs");
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(found(&root, &out), [("Y.JS".into(), "js"), ("z.Rs".into(), "rust")]);
+    }
+
+    #[test]
     fn a_walk_only_takes_active_languages() {
         let root = temp_dir("active");
         touch(&root, "a.ts");

@@ -51,6 +51,7 @@ pub trait Language: Sync {
     /// `"JavaScript/TypeScript"`, for `--help`.
     fn display_name(&self) -> &'static str;
     fn alias(&self) -> Option<&'static str>;
+    /// Lowercase, without the dot; files match them ignoring case.
     fn extensions(&self) -> &'static [&'static str];
     /// Used when `-` is read and `--ext` is absent.
     fn stdin_ext(&self) -> &'static str;
@@ -92,13 +93,14 @@ impl Registry {
         self.langs.iter().copied().find(|lang| lang.id() == id)
     }
 
-    /// The language within `active` whose extensions match `path` (case-sensitive).
+    /// The language within `active` whose extensions match `path`, ignoring
+    /// ASCII case (`Y.JS` is JavaScript); languages list their extensions lowercase.
     pub fn for_path(&self, path: &Path, active: &[Lang]) -> Option<Lang> {
-        let ext = path.extension()?.to_str()?;
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         active
             .iter()
             .copied()
-            .find(|lang| lang.extensions().contains(&ext))
+            .find(|lang| lang.extensions().contains(&ext.as_str()))
     }
 
     pub fn is_complete(&self) -> bool {
@@ -188,9 +190,16 @@ mod tests {
     }
 
     #[test]
-    fn for_path_is_case_sensitive_on_extension() {
+    fn for_path_ignores_the_case_of_the_extension() {
         let registry = Registry::all(&[&FAKE]);
-        assert!(registry.for_path(Path::new("a.FK"), &[&FAKE]).is_none());
+        assert_eq!(
+            registry.for_path(Path::new("a.FK"), &[&FAKE]).map(|l| l.id()),
+            Some("fake")
+        );
+        assert_eq!(
+            registry.for_path(Path::new("a.Fk"), &[&FAKE]).map(|l| l.id()),
+            Some("fake")
+        );
     }
 
     #[test]

@@ -168,6 +168,14 @@ mod tests {
     }
 
     #[test]
+    fn an_uppercase_declaration_suffix_is_not_skipped_as_in_jscx() {
+        // jscx matched `.d.ts` case-sensitively while lowercasing the extension,
+        // so `X.D.TS` was scored as TypeScript; keep that.
+        assert!(!JS.skip(Path::new("X.D.TS"), &LangOptions::default()));
+        assert!(!JS.skip(Path::new("x.D.ts"), &LangOptions::default()));
+    }
+
+    #[test]
     fn optional_chain_counts_only_when_asked() {
         let src = "function f(a){ return a?.b }";
         let off = analyze_as(src, "a.js", &LangOptions::default());
