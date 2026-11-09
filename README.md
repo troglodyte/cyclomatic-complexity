@@ -79,7 +79,8 @@ A language's own flags are accepted only when that language is active.
 
 Directories are walked recursively, skipping `node_modules`, `dist`, `build`,
 `coverage`, `.next`, `target`, `__pycache__`, `.venv`, `venv`, `vendor` and VCS
-directories. A file named explicitly on the command line is scored as the
+directories. A directory or entry that cannot be read is reported as
+`path: <error>` and the rest of the tree is still scanned (exit 2). A file named explicitly on the command line is scored as the
 active language when you pass a single language flag or use an alias; under bare
 `cmplx` a file no language claims is an error.
 

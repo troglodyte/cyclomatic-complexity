@@ -129,8 +129,12 @@ pub fn expand(paths: &[PathBuf], scope: &Scope) -> Expanded {
 /// The walk keeps an explicit stack of directory listings, one per level, so
 /// its depth is bounded by [`MAX_DIR_DEPTH`] rather than by the call stack. A
 /// directory below that level is reported in `out.problems` and not entered.
+///
+/// Only an unreadable `root` is an error; a directory or entry below it that
+/// cannot be read is reported in `out.problems` as `<path>: <error>` and the
+/// walk goes on with its siblings.
 fn collect(root: &Path, scope: &Scope, out: &mut Expanded) -> io::Result<()> {
-    let mut stack = vec![sorted_entries(root)?];
+    let mut stack = vec![sorted_entries(root, &mut out.problems)?];
     while let Some(level) = stack.last_mut() {
         let Some((path, file_type)) = level.next() else {
             stack.pop();
@@ -153,7 +157,10 @@ fn collect(root: &Path, scope: &Scope, out: &mut Expanded) -> io::Result<()> {
                 ));
                 continue;
             }
-            stack.push(sorted_entries(&path)?);
+            match sorted_entries(&path, &mut out.problems) {
+                Ok(entries) => stack.push(entries),
+                Err(e) => out.problems.push(format!("{}: {e}", path.display())),
+            }
         } else if file_type.is_file() {
             if let Some(lang) = scope.walked(&path) {
                 out.sources.push(Source { path, lang });
@@ -164,11 +171,27 @@ fn collect(root: &Path, scope: &Scope, out: &mut Expanded) -> io::Result<()> {
 }
 
 /// The entries of one directory, sorted by path, with their unfollowed types.
-fn sorted_entries(dir: &Path) -> io::Result<std::vec::IntoIter<(PathBuf, fs::FileType)>> {
-    let mut entries: Vec<(PathBuf, fs::FileType)> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
-        .collect();
+/// Opening `dir` is the only error returned; an entry that cannot be read is
+/// pushed onto `problems` (named by its own path when it has one, else by
+/// `dir`) and left out.
+fn sorted_entries(
+    dir: &Path,
+    problems: &mut Vec<String>,
+) -> io::Result<std::vec::IntoIter<(PathBuf, fs::FileType)>> {
+    let mut entries: Vec<(PathBuf, fs::FileType)> = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                problems.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(file_type) => entries.push((entry.path(), file_type)),
+            Err(e) => problems.push(format!("{}: {e}", entry.path().display())),
+        }
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries.into_iter())
 }
@@ -569,6 +592,80 @@ mod tests {
         );
         let names: Vec<String> = found(&root, &out).into_iter().map(|(p, _)| p).collect();
         assert_eq!(names, ["a.rs", "b/c/y.rs", "b/x.rs", "b/z.rs", "c.rs"]);
+    }
+
+    /// Makes `dir` unreadable until dropped, then restores its permissions so
+    /// the temp tree can be cleaned up even when an assertion fails.
+    #[cfg(unix)]
+    struct Unreadable(PathBuf);
+    #[cfg(unix)]
+    impl Unreadable {
+        fn new(dir: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+            Unreadable(dir.to_path_buf())
+        }
+        /// Root reads a mode-000 directory anyway, so the test means nothing.
+        fn still_readable(&self) -> bool {
+            fs::read_dir(&self.0).is_ok()
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            // Best effort in a destructor: a failure leaves a temp dir behind.
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_a_problem_and_the_walk_goes_on() {
+        let root = temp_dir("unreadable");
+        for rel in ["a/x.js", "b/y.js", "c/z.js"] {
+            touch(&root, rel);
+        }
+        let locked = Unreadable::new(&root.join("b"));
+        if locked.still_readable() {
+            eprintln!("skipped: running as root, a mode-000 directory is still readable");
+            return;
+        }
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(found(&root, &out), [("a/x.js".into(), "js"), ("c/z.js".into(), "js")]);
+        assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+        let prefix = format!("{}: ", root.join("b").display());
+        assert!(out.problems[0].starts_with(&prefix), "{:?}", out.problems);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_root_is_still_a_problem_naming_it() {
+        let root = temp_dir("unreadable-root");
+        touch(&root, "x.js");
+        let locked = Unreadable::new(&root);
+        if locked.still_readable() {
+            eprintln!("skipped: running as root, a mode-000 directory is still readable");
+            return;
+        }
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert!(out.sources.is_empty());
+        assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+        assert!(out.problems[0].starts_with(&format!("{}: ", root.display())));
     }
 
     #[test]

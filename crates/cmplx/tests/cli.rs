@@ -537,3 +537,27 @@ fn a_file_of_invalid_utf8_under_the_cap_is_scored_whatever_it_decodes_to() {
     assert_eq!(code, 0, "{stderr}");
     assert!(row_for(&stdout, "f").starts_with("     2"), "got:\n{stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subdirectory_is_reported_and_its_siblings_are_scored() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("unreadable-sub");
+    for sub in ["a", "b", "c"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+        std::fs::write(dir.join(sub).join(format!("{sub}.js")), format!("function {sub}Fn() {{}}\n")).unwrap();
+    }
+    let locked = dir.join("b");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let as_root = std::fs::read_dir(&locked).is_ok();
+    let result = (!as_root).then(|| cmplx_in(&dir, &["."]));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let Some((stdout, stderr, code)) = result else {
+        eprintln!("skipped: running as root, a mode-000 directory is still readable");
+        return;
+    };
+
+    assert_eq!(code, 2, "stderr:\n{stderr}");
+    assert!(stdout.contains("aFn") && stdout.contains("cFn"), "siblings scored:\n{stdout}");
+    assert!(stderr.contains("./b: "), "the problem names b:\n{stderr}");
+}
