@@ -25,6 +25,9 @@ pub struct FileConfig {
     /// LSP: warn at this score, error at twice it.
     pub threshold: Option<u32>,
     langs: BTreeMap<&'static str, LangOptions>,
+    /// Keys and tables an alias accepted without understanding them, e.g.
+    /// "unknown key `question`", for the caller to warn about.
+    ignored: Vec<String>,
 }
 
 /// A config file that could not be read or parsed.
@@ -94,9 +97,10 @@ impl FileConfig {
     }
 
     /// Parse `cmplx.toml` text. In a complete registry unknown keys and tables
-    /// are errors; in an alias registry they are ignored when they could belong
-    /// to a language that is not linked. A key inside a linked language's own
-    /// table that it does not declare is always an error.
+    /// are errors; in an alias registry they are ignored, since they could
+    /// belong to a language that is not linked, and noted in [`Self::ignored`].
+    /// A key inside a linked language's own table that it does not declare is
+    /// always an error.
     pub fn parse(path: &Path, text: &str, reg: &Registry) -> Result<FileConfig, ConfigError> {
         let fail = |message: String| ConfigError::new(path, message);
         let table = parse_table(path, text)?;
@@ -111,13 +115,15 @@ impl FileConfig {
                 _ => {
                     let owners: Vec<_> = declaring_langs(reg.langs(), key).collect();
                     if owners.is_empty() {
+                        let unknown = if value.is_table() {
+                            format!("unknown table `[{key}]`")
+                        } else {
+                            format!("unknown key `{key}`")
+                        };
                         if reg.is_complete() {
-                            return Err(fail(if value.is_table() {
-                                format!("unknown table `[{key}]`")
-                            } else {
-                                format!("unknown key `{key}`")
-                            }));
+                            return Err(fail(unknown));
                         }
+                        cfg.ignored.push(unknown);
                         continue;
                     }
                     let flag = value
@@ -286,7 +292,21 @@ impl FileConfig {
             max: self.max.or(lower.max),
             threshold: self.threshold.or(lower.threshold),
             langs,
+            ignored: [self.ignored, lower.ignored].concat(),
         }
+    }
+
+    /// What an alias ignored while parsing, one entry per key or table.
+    pub fn ignored(&self) -> &[String] {
+        &self.ignored
+    }
+
+    /// One warning per ignored key, naming the file it came from.
+    pub fn ignored_warnings(&self, path: &Path) -> Vec<String> {
+        self.ignored
+            .iter()
+            .map(|note| format!("{}: ignoring {note}", path.display()))
+            .collect()
     }
 
     /// The explicitly set options for `lang`.
@@ -312,6 +332,8 @@ pub struct Watched {
     path: Option<PathBuf>,
     mtime: Option<SystemTime>,
     config: FileConfig,
+    /// Warnings from the last load not yet taken by [`Watched::take_warnings`].
+    warnings: Vec<String>,
 }
 
 impl Watched {
@@ -323,12 +345,14 @@ impl Watched {
         match FileConfig::discover(start, &reg) {
             Ok(Some((path, config))) => {
                 let mtime = mtime_of(&path);
+                let warnings = config.ignored_warnings(&path);
                 (
                     Watched {
                         reg,
                         path: Some(path),
                         mtime,
                         config,
+                        warnings,
                     },
                     None,
                 )
@@ -339,6 +363,7 @@ impl Watched {
                     path: None,
                     mtime: None,
                     config: FileConfig::default(),
+                    warnings: Vec::new(),
                 },
                 None,
             ),
@@ -352,6 +377,7 @@ impl Watched {
                         path: Some(path),
                         mtime,
                         config: FileConfig::default(),
+                        warnings: Vec::new(),
                     },
                     Some(e),
                 )
@@ -373,11 +399,17 @@ impl Watched {
         self.mtime = now;
         match FileConfig::load(&path, &self.reg) {
             Ok(config) => {
+                self.warnings = config.ignored_warnings(&path);
                 self.config = config;
                 None
             }
             Err(e) => Some(e),
         }
+    }
+
+    /// Warnings about the last load (keys an alias ignored), each returned once.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     /// The config as last successfully read.
@@ -538,13 +570,32 @@ mod tests {
     fn an_alias_ignores_tables_for_languages_it_does_not_link() {
         let alias = Registry::alias(&JS);
         let cfg = FileConfig::parse(Path::new("cmplx.toml"), "[rust]\nx = true\n", &alias).unwrap();
-        assert_eq!(cfg, FileConfig::default());
+        assert_eq!(cfg.options_for(js()), LangOptions::default());
+        assert_eq!(cfg.ignored(), ["unknown table `[rust]`"]);
     }
 
     #[test]
     fn an_alias_ignores_top_level_keys_no_linked_language_declares() {
         let alias = Registry::alias(&JS);
         assert!(FileConfig::parse(Path::new("cmplx.toml"), "question = true", &alias).is_ok());
+    }
+
+    #[test]
+    fn an_alias_notes_each_key_and_table_it_ignores() {
+        let alias = Registry::alias(&JS);
+        let text = "question = true\nlogical = false\n[rust]\ntests = false\nquestion = true\n";
+        let cfg = FileConfig::parse(Path::new("cmplx.toml"), text, &alias).unwrap();
+        assert_eq!(
+            cfg.ignored(),
+            ["unknown key `question`", "unknown table `[rust]`"],
+            "one note per ignored key; a whole table is one key"
+        );
+        assert_eq!(cfg.options_for(js()).get("logical"), Some(false));
+    }
+
+    #[test]
+    fn a_complete_registry_notes_nothing() {
+        assert!(parse("max = 3\n[rust]\ntests = false\n").unwrap().ignored().is_empty());
     }
 
     #[test]

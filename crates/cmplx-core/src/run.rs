@@ -33,7 +33,10 @@ pub fn run(program: &'static str, reg: Registry) -> ExitCode {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match resolve(&cli, &cwd, &reg) {
-        Ok(config) => config,
+        Ok((config, warnings)) => {
+            warnings.iter().for_each(|w| eprintln!("{program}: {w}"));
+            config
+        }
         Err(msg) => {
             eprintln!("{program}: {msg}");
             return ExitCode::from(2);
@@ -78,14 +81,18 @@ fn apply(cli: &Cli, file: FileConfig) -> FileConfig {
 
 /// Find a `cmplx.toml` (or `rustcx.toml`) by walking up from `start`, and layer
 /// it under the flags. An unreadable or unparseable file is an error, not a
-/// shrug: a typo'd key that silently does nothing is the failure this guards against.
-fn resolve(cli: &Cli, start: &Path, reg: &Registry) -> Result<FileConfig, String> {
-    let file = match FileConfig::discover(start, reg) {
-        Ok(Some((_, file))) => file,
-        Ok(None) => FileConfig::default(),
+/// shrug: a typo'd key that silently does nothing is the failure this guards
+/// against. Keys an alias had to ignore come back as warnings to print.
+fn resolve(cli: &Cli, start: &Path, reg: &Registry) -> Result<(FileConfig, Vec<String>), String> {
+    let (file, warnings) = match FileConfig::discover(start, reg) {
+        Ok(Some((path, file))) => {
+            let warnings = file.ignored_warnings(&path);
+            (file, warnings)
+        }
+        Ok(None) => (FileConfig::default(), Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
-    Ok(apply(cli, file))
+    Ok((apply(cli, file), warnings))
 }
 
 /// Score stdin and the paths, print the report, and return the exit code.
@@ -427,7 +434,8 @@ mod tests {
         let nested = root.join("deep");
         fs::create_dir_all(&nested).unwrap();
         fs::write(root.join("cmplx.toml"), "max = 7\n[rust]\ntests = false\n").unwrap();
-        let config = resolve(&parse(&reg, &["x.rs"]), &nested, &reg).unwrap();
+        let (config, warnings) = resolve(&parse(&reg, &["x.rs"]), &nested, &reg).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.max, Some(7));
         assert_eq!(config.options_for(&RUST).get("tests"), Some(false));
     }

@@ -350,3 +350,32 @@ fn rustcx_scores_an_explicit_file_regardless_of_extension() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("gate"), "got:\n{stdout}");
 }
+
+#[test]
+fn an_alias_warns_once_per_config_key_it_ignores_and_still_runs() {
+    let dir = temp_dir("cli-alias-ignored");
+    std::fs::write(
+        dir.join("cmplx.toml"),
+        "question = true\nlogical = true\n[rust]\ntests = false\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("x.js"), "function f() {}\n").unwrap();
+
+    let out = Command::new(bin("jscx"))
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .arg("x.js")
+        .output()
+        .expect("run jscx");
+    assert_eq!(out.status.code(), Some(0));
+    let file = dir.join("cmplx.toml").canonicalize().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let file = file.display();
+    assert_eq!(
+        err,
+        format!(
+            "jscx: {file}: ignoring unknown key `question`\n\
+             jscx: {file}: ignoring unknown table `[rust]`\n"
+        )
+    );
+}

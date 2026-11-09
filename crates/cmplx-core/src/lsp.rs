@@ -134,6 +134,7 @@ impl<W: Write> Server<W> {
         if let Some(e) = err {
             self.log(&format!("config: {e}"))?;
         }
+        self.log_config_warnings()?;
         Ok(json!({
             "capabilities": {
                 "textDocumentSync": 1, // Full sync
@@ -152,10 +153,24 @@ impl<W: Write> Server<W> {
 
     /// Pick up an edited config file before using its settings.
     fn refresh_config(&mut self) -> io::Result<()> {
-        match self.config.as_mut().and_then(Watched::refresh) {
-            Some(e) => self.log(&format!("config: {e}")),
-            None => Ok(()),
+        if let Some(e) = self.config.as_mut().and_then(Watched::refresh) {
+            self.log(&format!("config: {e}"))?;
         }
+        self.log_config_warnings()
+    }
+
+    /// Log, once per load, each config key an alias ignored. The CLI prints
+    /// these on stderr; here stderr is unseen, so they go to the client's log.
+    fn log_config_warnings(&mut self) -> io::Result<()> {
+        let warnings = self
+            .config
+            .as_mut()
+            .map(Watched::take_warnings)
+            .unwrap_or_default();
+        for warning in warnings {
+            self.log(&format!("config: {warning}"))?;
+        }
+        Ok(())
     }
 
     /// The language that scores `path`, with its options, unless no language
@@ -728,6 +743,46 @@ mod tests {
             Value::Null,
             "must not wrap round to line 0"
         );
+    }
+
+    fn logs(server: &mut Server<Vec<u8>>) -> Vec<String> {
+        sent(server)
+            .iter()
+            .filter(|m| m["method"] == "window/logMessage")
+            .map(|m| m["params"]["message"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_alias_logs_each_config_key_it_ignores_at_start_and_on_reload() {
+        let dir = std::env::temp_dir().join(format!("cmplx-lsp-ignored-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("cmplx.toml");
+        std::fs::write(&config, "bogus = true\n").unwrap();
+        let mut s = Server::new("fakecx", &Registry::alias(&FAKE), Vec::new());
+        let params = json!({ "rootUri": format!("file://{}", dir.display()) });
+        s.request("initialize", json!(1), &params).unwrap();
+        assert_eq!(
+            logs(&mut s),
+            [format!("fakecx: config: {}: ignoring unknown key `bogus`", config.display())]
+        );
+
+        std::fs::write(&config, "[other]\nx = 1\n").unwrap();
+        let later = std::fs::metadata(&config).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&config)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(later))
+            .unwrap();
+        open(&mut s, "file:///x/a.fk", "f 1");
+        assert_eq!(
+            logs(&mut s),
+            [format!("fakecx: config: {}: ignoring unknown table `[other]`", config.display())]
+        );
+        open(&mut s, "file:///x/a.fk", "f 1");
+        assert!(logs(&mut s).is_empty(), "an unchanged file is not re-reported");
     }
 
     #[test]
