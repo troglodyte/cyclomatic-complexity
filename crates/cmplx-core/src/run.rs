@@ -144,9 +144,13 @@ fn resolve(cli: &Cli, cwd: &Path, reg: &Registry) -> Result<(FileConfig, Vec<Str
 }
 
 /// Where config discovery starts for a path argument: the directory itself,
-/// or the directory holding a file (or a path that does not exist).
+/// or the directory holding a file (or a path that does not exist). `..` is
+/// resolved first, so walking up starts from the directory the path names:
+/// `cmplx ..` from `p/sub` looks in `p`, not in `p/sub`.
 fn config_start(cwd: &Path, path: &Path) -> PathBuf {
-    let path = cwd.join(path);
+    let joined = cwd.join(path);
+    // A path that cannot be canonicalized (missing, say) is resolved lexically.
+    let path = std::fs::canonicalize(&joined).unwrap_or_else(|_| normalize(&joined));
     if path.is_dir() {
         return path;
     }
@@ -154,6 +158,29 @@ fn config_start(cwd: &Path, path: &Path) -> PathBuf {
         Some(parent) => parent.to_path_buf(),
         None => path,
     }
+}
+
+/// `path` with `.` dropped and each `..` taken back off the component before
+/// it, without touching the filesystem. A `..` with nothing before it to take
+/// off is kept.
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let last_is_normal = matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if last_is_normal {
+                    out.pop();
+                } else {
+                    out.push(component);
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => out.push(component),
+        }
+    }
+    out
 }
 
 /// A found config file's path, or `no config file`.
@@ -686,6 +713,44 @@ mod tests {
     }
 
     #[test]
+    fn normalize_resolves_dot_and_dot_dot_lexically() {
+        assert_eq!(normalize(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+        assert_eq!(normalize(Path::new("/a/..")), PathBuf::from("/"));
+        assert_eq!(normalize(Path::new("../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("a/../../x")), PathBuf::from("../x"));
+    }
+
+    #[test]
+    fn a_dot_dot_argument_finds_the_config_of_the_directory_it_names() {
+        let reg = both();
+        let root = temp_dir("dotdot");
+        fs::create_dir_all(root.join("p/sub")).unwrap();
+        fs::write(root.join("p/sub/cmplx.toml"), "max = 1\n").unwrap();
+        let cli = parse(&reg, &[".."]);
+        let (config, warnings) = resolve(&cli, &root.join("p/sub"), &reg).unwrap();
+        assert_eq!(config.max, None, "p has no config; p/sub's must not apply");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_dot_dot_path_from_a_configured_cwd_does_not_pick_up_the_cwds_config() {
+        let reg = both();
+        let root = temp_dir("dotdot-sibling");
+        fs::create_dir_all(root.join("p")).unwrap();
+        fs::create_dir_all(root.join("q")).unwrap();
+        fs::write(root.join("q/cmplx.toml"), "max = 1\n").unwrap();
+        let (config, _) = resolve(&parse(&reg, &["../p"]), &root.join("q"), &reg).unwrap();
+        assert_eq!(config.max, None, "q's config must not apply to ../p");
+        // A missing path is normalized lexically, not walked through `..`.
+        let (config, _) = resolve(&parse(&reg, &["../missing/x.rs"]), &root.join("q"), &reg).unwrap();
+        assert_eq!(config.max, None);
+        // And the later-path comparison sees the same resolved start.
+        let cli = parse(&reg, &["../p", "../q"]);
+        let (_, warnings) = resolve(&cli, &root.join("q"), &reg).unwrap();
+        assert_eq!(warnings.len(), 1, "../q finds q/cmplx.toml, ../p finds none: {warnings:?}");
+    }
+
+    #[test]
     fn several_paths_use_the_first_paths_config_and_warn_once_about_the_others() {
         let reg = both();
         let (proj, elsewhere) = project("several");
@@ -699,13 +764,17 @@ mod tests {
         );
         let (config, warnings) = resolve(&cli, &elsewhere, &reg).unwrap();
         assert_eq!(config.max, Some(1));
+        // Found files are named by their canonical paths (`/var` is
+        // `/private/var` on macOS).
+        let other_cfg = fs::canonicalize(other.join("cmplx.toml")).unwrap();
+        let proj_cfg = fs::canonicalize(proj.join("cmplx.toml")).unwrap();
         assert_eq!(
             warnings,
             [format!(
                 "{}: would use {}, but every path uses {}, found from the first path",
                 other.display(),
-                other.join("cmplx.toml").display(),
-                proj.join("cmplx.toml").display()
+                other_cfg.display(),
+                proj_cfg.display()
             )],
             "one warning, for the first path that differs"
         );

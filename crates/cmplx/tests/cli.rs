@@ -586,3 +586,15 @@ fn contradictory_or_lsp_incompatible_arguments_exit_two() {
     assert_eq!(code, 2);
     assert_eq!(stderr, "cmplx: --lsp takes no paths or output options\n");
 }
+
+#[test]
+fn a_dot_dot_argument_does_not_use_the_working_directorys_config() {
+    let root = temp_dir("dotdot");
+    let sub = root.join("p/sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("cmplx.toml"), "max = 1\n").unwrap();
+    std::fs::write(root.join("p/a.js"), "function pick(a) { return a ? 1 : 2; }\n").unwrap();
+
+    let (_, stderr, code) = cmplx_in(&sub, &[".."]);
+    assert_eq!(code, 0, "p has no cmplx.toml, so no max applies; stderr:\n{stderr}");
+}
