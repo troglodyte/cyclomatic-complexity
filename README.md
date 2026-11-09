@@ -244,6 +244,8 @@ only for Rust. Its keys are top-level (`max`, `threshold`, `question`,
 
 `max` and `threshold` are independent: `max` gates CI, `threshold` is the
 editor's warning level (default 11). Set both if you want them identical.
+`threshold` must be at least 1: `threshold = 0` in the file is an error, and in
+`initializationOptions` it is logged and ignored, keeping the other options.
 
 ## Aliases
 

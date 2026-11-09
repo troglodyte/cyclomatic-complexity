@@ -70,6 +70,10 @@ fn declaring_langs<'a>(
         .filter_map(move |lang| declared_key(lang, key).map(|k| (lang, k)))
 }
 
+/// Lowest usable `threshold`. At 0 every function, however simple, would warn,
+/// and twice 0 would make every warning an error.
+const MIN_THRESHOLD: u32 = 1;
+
 fn to_u32(value: &toml::Value) -> Option<u32> {
     value.as_integer().and_then(|n| u32::try_from(n).ok())
 }
@@ -88,6 +92,9 @@ impl FileConfig {
             _ => return Ok(false),
         };
         let n = to_u32(value).ok_or_else(|| format!("`{key}` must be a non-negative integer"))?;
+        if key == "threshold" && n < MIN_THRESHOLD {
+            return Err(format!("threshold must be at least {MIN_THRESHOLD}"));
+        }
         *slot = Some(n);
         Ok(true)
     }
@@ -237,6 +244,9 @@ impl FileConfig {
             match key.as_str() {
                 "max" | "threshold" => match number(value) {
                     Some(n) if key == "max" => cfg.max = Some(n),
+                    Some(n) if n < MIN_THRESHOLD => warnings.push(format!(
+                        "initializationOptions `threshold` must be at least {MIN_THRESHOLD}; ignored"
+                    )),
                     Some(n) => cfg.threshold = Some(n),
                     None => warnings.push(format!(
                         "initializationOptions `{key}` must be a non-negative integer; ignored"
@@ -721,6 +731,31 @@ mod tests {
         assert_eq!(cfg.options_for(rust()).get("tests"), Some(false));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("threshold"));
+    }
+
+    #[test]
+    fn a_threshold_of_zero_is_a_config_error() {
+        let err = parse("threshold = 0").unwrap_err();
+        assert_eq!(err.message, "threshold must be at least 1");
+        let legacy =
+            FileConfig::parse_legacy_rust(Path::new("rustcx.toml"), "threshold = 0", &both())
+                .unwrap_err();
+        assert_eq!(legacy.message, "threshold must be at least 1");
+        assert_eq!(parse("threshold = 1").unwrap().threshold, Some(1));
+        assert_eq!(parse("max = 0").unwrap().max, Some(0), "a max of 0 still means something");
+    }
+
+    #[test]
+    fn a_threshold_of_zero_in_init_options_is_warned_about_and_dropped_alone() {
+        let v = serde_json::json!({"threshold": 0, "max": 4, "tests": false});
+        let (cfg, warnings) = FileConfig::from_init_options(&v, &both(), &[rust()]);
+        assert_eq!(cfg.threshold, None);
+        assert_eq!(cfg.max, Some(4));
+        assert_eq!(cfg.options_for(rust()).get("tests"), Some(false));
+        assert_eq!(
+            warnings,
+            ["initializationOptions `threshold` must be at least 1; ignored"]
+        );
     }
 
     #[test]
