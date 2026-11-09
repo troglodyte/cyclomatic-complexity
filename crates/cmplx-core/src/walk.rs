@@ -119,15 +119,17 @@ pub fn expand(paths: &[PathBuf], scope: &Scope) -> Expanded {
 }
 
 /// Recursively collect claimed files under `root` in sorted order, skipping
-/// [`SKIP_DIRS`].
+/// [`SKIP_DIRS`]. Symlinks met while walking are not followed, as in jscx: a
+/// link to a parent would count files twice, and two such links never end.
 fn collect(root: &Path, scope: &Scope, out: &mut Vec<Source>) -> io::Result<()> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(root)?
+    let mut entries: Vec<(PathBuf, fs::FileType)> = fs::read_dir(root)?
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
         .collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    // `DirEntry::file_type` does not follow links, so a symlink is neither.
+    for (path, file_type) in entries {
+        if file_type.is_dir() {
             let skip = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -135,8 +137,10 @@ fn collect(root: &Path, scope: &Scope, out: &mut Vec<Source>) -> io::Result<()> 
             if !skip {
                 collect(&path, scope, out)?;
             }
-        } else if let Some(lang) = scope.walked(&path) {
-            out.push(Source { path, lang });
+        } else if file_type.is_file() {
+            if let Some(lang) = scope.walked(&path) {
+                out.push(Source { path, lang });
+            }
         }
     }
     Ok(())
@@ -404,6 +408,57 @@ mod tests {
         let out = expand_with(&paths, &reg, reg.langs(), true, &FileConfig::default());
         assert_eq!(found(&root, &out), [("a.rs".into(), "rust")]);
         assert_eq!(out.problems.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_does_not_follow_symlinked_directories_so_a_loop_ends() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("symlink-loop");
+        touch(&root, "sub/a.rs");
+        symlink(&root, root.join("sub/up")).unwrap();
+        symlink(&root, root.join("sub/up2")).unwrap();
+        let reg = both();
+        let out = expand_with(
+            std::slice::from_ref(&root),
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(found(&root, &out), [("sub/a.rs".into(), "rust")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_skips_symlinked_files_but_a_named_symlink_is_followed() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("symlink-file");
+        touch(&root, "real/a.rs");
+        fs::create_dir_all(root.join("links")).unwrap();
+        symlink(root.join("real/a.rs"), root.join("links/b.rs")).unwrap();
+        symlink(root.join("real"), root.join("dir-link")).unwrap();
+        let reg = both();
+        let walked = expand_with(
+            &[root.join("links")],
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert!(walked.sources.is_empty(), "as old jscx: only regular files are walked");
+
+        let named = expand_with(
+            &[root.join("links/b.rs"), root.join("dir-link")],
+            &reg,
+            reg.langs(),
+            false,
+            &FileConfig::default(),
+        );
+        assert_eq!(
+            found(&root, &named),
+            [("links/b.rs".into(), "rust"), ("dir-link/a.rs".into(), "rust")]
+        );
     }
 
     #[test]
