@@ -10,6 +10,19 @@ use colored::Colorize;
 use serde_json::{json, Value};
 use std::io::{self, Write};
 
+/// Highest score shown as itself; anything above shows as `100+` in the table
+/// and the language server. JSON and every filter keep the real number.
+pub const MAX_SHOWN_COMPLEXITY: u32 = 100;
+
+/// A score as people read it: the number, or `100+` above [`MAX_SHOWN_COMPLEXITY`].
+pub fn shown_complexity(complexity: u32) -> String {
+    if complexity > MAX_SHOWN_COMPLEXITY {
+        format!("{MAX_SHOWN_COMPLEXITY}+")
+    } else {
+        complexity.to_string()
+    }
+}
+
 /// One scored function and where it came from.
 #[derive(Clone)]
 pub struct Row {
@@ -163,7 +176,7 @@ fn write_grouped<W: Write>(w: &mut W, rows: &[Row], style: Style) -> io::Result<
         writeln!(
             w,
             "{:>6}{:>7}  {:<13}{}{}",
-            f.complexity,
+            shown_complexity(f.complexity),
             f.line,
             f.kind.label,
             " ".repeat(2 * f.depth as usize),
@@ -203,7 +216,7 @@ fn write_flat<W: Write>(w: &mut W, rows: &[Row], style: Style) -> io::Result<()>
         writeln!(
             w,
             "{:>6}  {}{}  {:<13}{}",
-            f.complexity,
+            shown_complexity(f.complexity),
             loc.bold(),
             pad,
             f.kind.label,
@@ -265,7 +278,7 @@ fn json_function(row: &Row) -> Value {
         .iter()
         .map(|p| json!({ "line": p.line, "branch": p.branch }))
         .collect();
-    json!({
+    let mut function = json!({
         "file": row.file,
         "language": row.lang.id(),
         "name": f.name,
@@ -274,7 +287,13 @@ fn json_function(row: &Row) -> Value {
         "depth": f.depth,
         "complexity": f.complexity,
         "points": points,
-    })
+    });
+    // `complexity` stays the real number for sorting and scripts; `capped`
+    // says the table and the language server show it as `100+`.
+    if f.complexity > MAX_SHOWN_COMPLEXITY {
+        function["capped"] = Value::Bool(true);
+    }
+    function
 }
 
 fn json_summary(summary: &Summary) -> Value {
@@ -715,6 +734,52 @@ src/b.rs
             v["functions"][1]["kind"], "trait_fn",
             "kind is the id, not the label"
         );
+    }
+
+    fn at_and_past_the_shown_cap() -> Vec<Row> {
+        vec![
+            row("a.rs", func("at", FN, 1, 100, 0)),
+            row("a.rs", func("past", FN, 2, 101, 0)),
+        ]
+    }
+
+    #[test]
+    fn the_shown_complexity_cap_is_one_hundred() {
+        assert_eq!(MAX_SHOWN_COMPLEXITY, 100);
+    }
+
+    #[test]
+    fn a_score_above_the_cap_shows_as_100_plus_in_the_grouped_table() {
+        let out = render(&at_and_past_the_shown_cap(), true, false);
+        assert!(out.contains("\n   100      1  fn           at\n"), "got:\n{out}");
+        assert!(out.contains("\n  100+      2  fn           past\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn a_score_above_the_cap_shows_as_100_plus_in_the_flat_table() {
+        let out = render_flat(&at_and_past_the_shown_cap(), true, false);
+        assert!(out.contains("\n   100  a.rs:1    fn           at\n"), "got:\n{out}");
+        assert!(out.contains("\n  100+  a.rs:2    fn           past\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn json_keeps_the_real_score_and_marks_only_scores_above_the_cap() {
+        let v = json(&at_and_past_the_shown_cap(), None);
+        assert_eq!(v["functions"][0]["complexity"], 100);
+        assert!(v["functions"][0].get("capped").is_none(), "{}", v["functions"][0]);
+        assert_eq!(v["functions"][1]["complexity"], 101);
+        assert_eq!(v["functions"][1]["capped"], true);
+    }
+
+    #[test]
+    fn sorting_top_and_the_gate_use_the_real_scores_above_the_cap() {
+        let rows = vec![
+            row("a.rs", func("lower", FN, 1, 101, 0)),
+            row("a.rs", func("higher", FN, 2, 150, 0)),
+        ];
+        let top = Filter { top: Some(1), ..Filter::default() };
+        assert_eq!(selected(top, rows.clone()), ["higher"]);
+        assert_eq!(over_limit(&rows, Some(120)), 1);
     }
 
     #[test]

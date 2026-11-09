@@ -17,6 +17,7 @@
 use crate::config::{FileConfig, Watched};
 use crate::language::{analyze_bounded, Lang, LangOptions, Registry};
 use crate::model::{Func, ParseError, ParseErrorKind};
+use crate::report::shown_complexity;
 use crate::run::{size_label, MAX_FILE_BYTES};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -495,7 +496,9 @@ fn diagnostics_for(funcs: &[Func], text: &str, threshold: u32, source: &str) -> 
                 "source": source,
                 "message": format!(
                     "Complexity is {} for {} '{}'",
-                    f.complexity, f.kind.label, f.name
+                    shown_complexity(f.complexity),
+                    f.kind.label,
+                    f.name
                 ),
             })
         })
@@ -519,7 +522,9 @@ fn hover_at(funcs: &[Func], line: u32) -> Option<String> {
 
     let mut out = format!(
         "`{}` — {} complexity {}\n",
-        f.name, f.kind.label, f.complexity
+        f.name,
+        f.kind.label,
+        shown_complexity(f.complexity)
     );
     for p in &f.points {
         out.push_str(&format!("\n- line {} — {}", p.line, p.branch));
@@ -710,6 +715,20 @@ mod tests {
             "Complexity is 10 for trait fn 'parse_args'"
         );
         assert_eq!(d[0]["source"], "cmplx");
+    }
+
+    #[test]
+    fn a_diagnostic_shows_a_score_above_the_cap_as_100_plus() {
+        assert_eq!(diags("f 100", 5)[0]["message"], "Complexity is 100 for trait fn 'f'");
+        assert_eq!(diags("f 101", 5)[0]["message"], "Complexity is 100+ for trait fn 'f'");
+    }
+
+    #[test]
+    fn the_hover_header_shows_a_score_above_the_cap_as_100_plus() {
+        let at = hover_at(&[func("f", 1, 100)], 1).unwrap();
+        assert!(at.starts_with("`f` — trait fn complexity 100\n"), "{at}");
+        let past = hover_at(&[func("f", 1, 101)], 1).unwrap();
+        assert!(past.starts_with("`f` — trait fn complexity 100+\n"), "{past}");
     }
 
     #[test]
