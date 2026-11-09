@@ -1,7 +1,7 @@
---- Locates the `rustcx` executable.
+--- Locates the `cmplx` executable.
 local M = {}
 
-M.EXECUTABLE = "rustcx"
+M.EXECUTABLE = "cmplx"
 
 --- The real lookups, injectable so every branch below is testable.
 local function real_deps()

@@ -1,13 +1,13 @@
---- Neovim LSP config for rustcx. Discovered off the runtimepath by
---- `vim.lsp.enable("rustcx")`; see extensions/nvim/README.md.
-local binary = require("rustcx.binary")
+--- Neovim LSP config for cmplx. Discovered off the runtimepath by
+--- `vim.lsp.enable("cmplx")`; see extensions/nvim/README.md.
+local binary = require("cmplx.binary")
 
-local MARKERS = { "Cargo.toml", ".git" }
+local MARKERS = { "Cargo.toml", "package.json", "tsconfig.json", "jsconfig.json", ".git" }
 
 local NOT_FOUND = table.concat({
-  "rustcx not found on PATH or in ~/.cargo/bin. Install it with",
+  "cmplx not found on PATH or in ~/.cargo/bin. Install it with",
   "'cargo install --path .', or point at it with",
-  'vim.lsp.config("rustcx", { cmd = { "/path/to/rustcx", "--lsp" } }).',
+  'vim.lsp.config("cmplx", { cmd = { "/path/to/cmplx", "--lsp" } }).',
 }, "\n")
 
 local exe = binary.resolve()
@@ -17,11 +17,11 @@ end
 
 return {
   cmd = { exe or binary.EXECUTABLE, "--lsp" },
-  filetypes = { "rust" },
+  filetypes = { "javascript", "javascriptreact", "typescript", "typescriptreact", "rust" },
   -- No `init_options` key on purpose. An absent threshold is what lets
-  -- rustcx.toml apply; sending a default here would override the file in every
+  -- cmplx.toml apply; sending a default here would override the file in every
   -- project. Set one explicitly with:
-  --   vim.lsp.config("rustcx", { init_options = { threshold = 15 } })
+  --   vim.lsp.config("cmplx", { init_options = { threshold = 15 } })
   --
   -- A predicate rather than `root_markers`, because declining to call `on_dir`
   -- is the only hook Neovim offers for "do not attach to this buffer" — which
