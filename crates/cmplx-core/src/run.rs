@@ -330,7 +330,7 @@ mod tests {
     use crate::cli::{parse_args, Cli};
     use crate::config::FileConfig;
     use crate::language::{LangOptions, Language, OptionSpec, Registry};
-    use crate::model::{Func, Kind, ParseError};
+    use crate::model::{Func, Kind, ParseError, ParseErrorKind};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -385,6 +385,7 @@ mod tests {
                     return Err(ParseError {
                         line: line_no,
                         message: "bad".into(),
+                        kind: ParseErrorKind::Syntax,
                     });
                 }
                 if line == "ext?" {

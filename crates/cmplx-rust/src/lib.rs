@@ -4,7 +4,7 @@ pub mod analyze;
 mod nesting;
 
 use cmplx_core::language::{LangOptions, Language, OptionSpec};
-use cmplx_core::model::{Func, Kind, ParseError, Point};
+use cmplx_core::model::{Func, Kind, ParseError, ParseErrorKind, Point};
 use std::path::Path;
 
 const KIND_FN: Kind = Kind { id: "fn", label: "fn" };
@@ -102,9 +102,7 @@ impl Language for Rust {
             proc_macro2::extra::invalidate_current_thread_spans();
             result
         });
-        result
-            .map(|funcs| funcs.into_iter().map(core_func).collect())
-            .map_err(|e| ParseError { line: e.line, message: e.message })
+        result.map(|funcs| funcs.into_iter().map(core_func).collect())
     }
 }
 
@@ -131,17 +129,19 @@ fn on_parse_stack<T: Send>(parse: impl Fn() -> T + Sync) -> T {
 }
 
 /// Refuse a file nested deeper than [`MAX_NESTING`], else analyze it.
-fn analyze_bounded(
-    src: &str,
-    options: analyze::Options,
-) -> Result<Vec<analyze::Func>, analyze::ParseError> {
-    match nesting::too_deep_at(src) {
-        Some(line) => Err(analyze::ParseError {
+fn analyze_bounded(src: &str, options: analyze::Options) -> Result<Vec<analyze::Func>, ParseError> {
+    if let Some(line) = nesting::too_deep_at(src) {
+        return Err(ParseError {
             line,
             message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
-        }),
-        None => analyze::analyze(src, options),
+            kind: ParseErrorKind::TooDeep,
+        });
     }
+    analyze::analyze(src, options).map_err(|e| ParseError {
+        line: e.line,
+        message: e.message,
+        kind: ParseErrorKind::Syntax,
+    })
 }
 
 #[cfg(test)]
@@ -191,6 +191,7 @@ mod tests {
     fn a_parse_error_carries_its_line() {
         let err = analyze_with("fn f( {", &LangOptions::default()).unwrap_err();
         assert_eq!(err.line, 1);
+        assert_eq!(err.kind, ParseErrorKind::Syntax);
     }
 
     #[test]
@@ -248,6 +249,7 @@ mod tests {
             ParseError {
                 line: 3,
                 message: format!("too deeply nested to score (> {MAX_NESTING} levels)"),
+                kind: ParseErrorKind::TooDeep,
             }
         );
     }

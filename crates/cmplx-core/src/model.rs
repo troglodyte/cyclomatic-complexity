@@ -31,4 +31,14 @@ pub struct Func {
 pub struct ParseError {
     pub line: u32,
     pub message: String,
+    pub kind: ParseErrorKind,
+}
+
+/// Why a source could not be parsed, which decides how the LSP shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseErrorKind {
+    /// Not valid source. Usually passing, while someone is typing.
+    Syntax,
+    /// Nested too deeply to parse safely. Lasts until the file is edited.
+    TooDeep,
 }

@@ -16,7 +16,7 @@
 
 use crate::config::{FileConfig, Watched};
 use crate::language::{Lang, LangOptions, Registry};
-use crate::model::Func;
+use crate::model::{Func, ParseError, ParseErrorKind};
 use crate::run::{size_label, MAX_FILE_BYTES};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -199,6 +199,7 @@ impl<W: Write> Server<W> {
         }
         let funcs = match lang.analyze(text, &path, &opts) {
             Ok(funcs) => funcs,
+            Err(e) if e.kind == ParseErrorKind::TooDeep => return self.too_deep(uri, text, &e),
             Err(e) => return self.parse_failed(uri, &format!("{uri}: {}: {}", e.line, e.message)),
         };
         let threshold = self.settings().threshold.unwrap_or(DEFAULT_THRESHOLD);
@@ -222,6 +223,24 @@ impl<W: Write> Server<W> {
         }
         doc.last_error = Some(message.to_string());
         self.log(message)
+    }
+
+    /// Publish one warning saying why a too-deeply-nested document has no
+    /// scores. Unlike a syntax error this lasts until the file is edited, so
+    /// keeping the last good diagnostics would leave them stale indefinitely
+    /// with no hint why; and no other server reports it.
+    fn too_deep(&mut self, uri: &str, text: &str, error: &ParseError) -> io::Result<()> {
+        let doc = self.docs.entry(uri.to_string()).or_default();
+        doc.funcs.clear();
+        doc.last_error = None;
+        let row = error.line.saturating_sub(1);
+        let diagnostic = json!({
+            "range": line_range(text, row),
+            "severity": SEVERITY_WARNING,
+            "source": self.program,
+            "message": error.message,
+        });
+        self.publish(uri, vec![diagnostic])
     }
 
     /// Publish no diagnostics for a document over the size cap, as the CLI
@@ -435,6 +454,18 @@ fn read_message(input: &mut impl BufRead) -> io::Result<Option<Value>> {
     Ok(Some(serde_json::from_slice(&body).unwrap_or(Value::Null)))
 }
 
+/// The LSP range covering 0-based line `row` of `text`, in UTF-16 units.
+fn line_range(text: &str, row: u32) -> Value {
+    let end = text
+        .lines()
+        .nth(row as usize)
+        .map_or(0, |line| line.encode_utf16().count());
+    json!({
+        "start": { "line": row, "character": 0 },
+        "end": { "line": row, "character": end },
+    })
+}
+
 /// Build the diagnostics for one analyzed document: a warning at or above
 /// `threshold`, an error at or above twice it, each spanning the function's
 /// whole first line.
@@ -498,7 +529,7 @@ fn hover_at(funcs: &[Func], line: u32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::language::{LangOptions, Language, OptionSpec};
-    use crate::model::{Kind, ParseError, Point};
+    use crate::model::{Kind, ParseError, ParseErrorKind, Point};
 
     const SKIP_ALL: OptionSpec = OptionSpec {
         key: "skip-all",
@@ -509,8 +540,9 @@ mod tests {
     };
     static OPTIONS: [OptionSpec; 1] = [SKIP_ALL];
 
-    /// Each source line `name score` is one function on that line; a line `!`
-    /// is a parse error. `skip-all` makes the language skip every path.
+    /// Each source line `name score` is one function on that line; a line
+    /// `deep` is a too-deep error and any other line without a space a syntax
+    /// error. `skip-all` makes the language skip every path.
     struct Fake;
     impl Language for Fake {
         fn id(&self) -> &'static str {
@@ -540,9 +572,17 @@ mod tests {
                 .filter(|(_, line)| !line.trim().is_empty())
                 .map(|(i, line)| {
                     let line_no = i as u32 + 1;
+                    if line == "deep" {
+                        return Err(ParseError {
+                            line: line_no,
+                            message: "too deep".into(),
+                            kind: ParseErrorKind::TooDeep,
+                        });
+                    }
                     let (name, cc) = line.split_once(' ').ok_or(ParseError {
                         line: line_no,
                         message: "expected `name score`".into(),
+                        kind: ParseErrorKind::Syntax,
                     })?;
                     Ok(func(name, line_no, cc.trim().parse().unwrap_or(1)))
                 })
@@ -883,6 +923,33 @@ mod tests {
             1,
             "hover keeps the last good parse"
         );
+    }
+
+    #[test]
+    fn a_too_deep_document_publishes_one_warning_at_the_reported_line() {
+        let mut s = server();
+        initialize(&mut s, Value::Null);
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        sent(&mut s);
+
+        open(&mut s, "file:///x/a.fk", "f 20\ndeep\n");
+        let lists = published(&mut s);
+        assert_eq!(
+            lists,
+            vec![json!([{
+                "range": {
+                    "start": { "line": 1, "character": 0 },
+                    "end": { "line": 1, "character": 4 },
+                },
+                "severity": 2,
+                "source": "cmplx",
+                "message": "too deep",
+            }])]
+        );
+        assert_eq!(hover_line(&s, 0), Value::Null, "the last scores are dropped");
+
+        open(&mut s, "file:///x/a.fk", "f 20\n");
+        assert_eq!(published(&mut s)[0].as_array().unwrap().len(), 1, "fixed, scored again");
     }
 
     #[test]

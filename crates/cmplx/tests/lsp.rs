@@ -359,6 +359,36 @@ fn a_parse_failure_keeps_the_last_good_diagnostics() {
 }
 
 #[test]
+fn a_too_deeply_nested_document_gets_one_warning_saying_why_and_the_server_lives_on() {
+    let message = format!(
+        "too deeply nested to score (> {} levels)",
+        cmplx_rust::MAX_NESTING
+    );
+    for program in RUST_SERVERS {
+        let mut s = Server::start(program);
+        s.initialize();
+        s.did_open("file:///x.rs", &branchy("f", 20));
+        assert_eq!(s.diagnostics()["diagnostics"].as_array().unwrap().len(), 1);
+
+        let deep = format!("fn f() {{\n    {}1{};\n}}\n", "(".repeat(1000), ")".repeat(1000));
+        s.did_change("file:///x.rs", &deep);
+        let list = s.diagnostics()["diagnostics"].as_array().unwrap().clone();
+        assert_eq!(list.len(), 1, "{program}: {list:?}");
+        assert_eq!(list[0]["message"], message);
+        assert_eq!(list[0]["severity"], 2);
+        assert_eq!(list[0]["source"], program);
+        assert_eq!(list[0]["range"]["start"]["line"], 1);
+
+        s.did_change("file:///x.rs", &branchy("f", 20));
+        assert_eq!(
+            s.diagnostics()["diagnostics"].as_array().unwrap().len(),
+            1,
+            "{program}: still serving"
+        );
+    }
+}
+
+#[test]
 fn hover_still_answers_from_the_last_good_parse() {
     for program in RUST_SERVERS {
         let mut s = Server::start(program);
