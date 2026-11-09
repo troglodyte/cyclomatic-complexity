@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 import { realEnv, resolveBinary } from "./resolve";
+import { documentSelector } from "./selector";
 
 let client: LanguageClient | undefined;
 
@@ -40,9 +41,7 @@ async function start(): Promise<void> {
 
   const configured_threshold = threshold();
   const clientOptions: LanguageClientOptions = {
-    documentSelector: ["javascript", "javascriptreact", "typescript", "typescriptreact", "rust"].map(
-      (language) => ({ scheme: "file", language }),
-    ),
+    documentSelector: documentSelector(),
     initializationOptions:
       configured_threshold === undefined ? undefined : { threshold: configured_threshold },
   };

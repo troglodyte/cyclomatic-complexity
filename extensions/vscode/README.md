@@ -2,6 +2,11 @@
 
 Cyclomatic complexity diagnostics and hover from `cmplx --lsp` for JavaScript, TypeScript (and React variants) and Rust.
 
+Saved files and unsaved (`untitled:`) buffers are both sent to the server. The
+server picks the language from the extension in the document's URI, so an
+unsaved buffer is scored when its URI carries one (as `code new.rs` gives a file
+that does not exist yet); a plain *Untitled-1* buffer gets no diagnostics.
+
 ## Requirements
 
 - The `cmplx` binary: `cargo install --path ../../crates/cmplx`
@@ -40,5 +45,5 @@ and explains the score on hover. *Output → cmplx* carries the server log.
 npm test
 ```
 
-Covers binary resolution, which is the only part of this extension that can run
-outside a VS Code process.
+Covers binary resolution and the document selector, the parts of this
+extension that can run outside a VS Code process.
