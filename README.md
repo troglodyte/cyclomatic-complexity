@@ -324,9 +324,10 @@ A function scoring above 100 also carries `"capped": true` (see [Limits](#limits
   is scored anyway. `--no-tests` recognises only the bare `#[cfg(test)]` form.
 - **Branches outside a function are not scored** (`const`/`static` initializers,
   array lengths).
-- **The server analyzes one document at a time**, and a panic ends the process
-  (`panic = "abort"`). Some editors restart a dead language server; others,
-  such as Neovim, leave it stopped until you restart it.
+- **The server analyzes one document at a time.** An analyzer crash costs one
+  document (see [Crash protection](#limits)); a panic anywhere else ends the
+  process (`panic = "abort"`). Some editors restart a dead language server;
+  others, such as Neovim, leave it stopped until you restart it.
 
 ## Limits
 
@@ -340,14 +341,39 @@ file, the rest of the run continues, and the run exits 2.
 | Directory depth | 64 levels below each path given | `path: directory nesting deeper than 64; not scanned`. The directory is skipped and the rest of the tree is scanned. |
 | File size | 10 MB (10,485,760 bytes), files and stdin | `path: larger than 10 MB; not scored` (`<stdin>` for stdin). The language server publishes no diagnostics for a larger document and logs once. |
 
-The depth is counted before a file is analyzed, in one pass that stops at the
+The depth is counted before a file is analyzed, in one iterative pass: lexing
+is linear in the file whatever its depth, and only the counting stops at the
 first line past the cap. Brackets inside strings, characters and comments do
 not count, nor do those in JS/TS template text, regular expressions and JSX
-text. Rust needs the cap because `syn` parses recursively and a stack overflow
-aborts the process instead of failing one file; Rust files are also parsed on
-their own 16 MB thread. JS/TS is held to the same cap so that the limit does
-not depend on the language. Any other analyzer failure will be handled by a
-supervisor process, planned in the next commit series.
+text. Rust needs the cap because `syn` parses recursively; Rust files are also
+parsed on their own 16 MB thread. JS/TS is held to the same cap so that the
+limit does not depend on the language.
+
+**Crash protection.** Files are analyzed in a worker: a second copy of the same
+binary, started once per run (or once per language-server session) and fed one
+file at a time. A file that crashes the worker fails alone, whatever the cause
+(a shape the nesting cap does not catch, such as thousands of nested closures,
+can still overflow `syn`'s stack). The next file starts a fresh worker. The
+CLI prints, after `path: ` (with the file's language in place of `Rust`), and
+exits 2 as for any other per-file failure:
+
+| Case | Message |
+| --- | --- |
+| Stack overflow | `not scored: the Rust analyzer crashed (stack overflow); the file is probably nested too deeply to analyze` |
+| No answer within 10 s | `not scored: the Rust analyzer took longer than 10 s` (the worker is killed) |
+| Any other crash | `not scored: the Rust analyzer crashed (exit code N)` or `(signal NAME)`, then the worker's first stderr line, cut to 200 characters |
+| An answer that is not a response | `not scored: the Rust analyzer sent a bad response: …` |
+| More than 10 restarts in one run | `not scored: the analyzer kept crashing; gave up after 10 restarts`, for every remaining file |
+
+The language server keeps one worker for the session and restarts it on the
+next document after a crash. It shows the crash as one warning on line 0 of
+that document; other documents are unaffected. It remembers the exact text
+that crashed and shows the same warning, without trying again, until the text
+changes. It restarts at most 10 times in any 60 seconds; past that, documents
+get `not scored: the analyzer kept crashing; restarting is paused for a minute`
+until the minute is up. If the worker cannot be started at all, the binary
+prints (or logs) `running without crash protection: <error>` once and analyzes
+in its own process for the rest of the run, where a crash ends the run.
 
 Scores above 100 show as `100+` in the table, in language-server diagnostics
 and in hover. JSON keeps the real number in `complexity` and adds

@@ -66,8 +66,9 @@ pub trait Language: Sync {
     fn skip(&self, path: &Path, opts: &LangOptions) -> bool;
     /// The 1-based line on which `(`, `[` and `{` first nest deeper than
     /// `limit` levels, or `None` if they never do. Brackets inside strings,
-    /// chars, comments and other literals do not count. One iterative pass
-    /// that stops at that line, so any depth is safe to scan.
+    /// chars, comments and other literals do not count. One iterative pass:
+    /// lexing stays linear in the source whatever its depth, and only the
+    /// counting stops at that line, so any depth is safe to scan.
     fn first_line_deeper_than(
         &self,
         src: &str,
