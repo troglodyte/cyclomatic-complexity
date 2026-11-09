@@ -242,6 +242,7 @@ fn write_points<W: Write>(w: &mut W, f: &Func, explain: bool, width: usize) -> i
 }
 
 /// The one-line summary, then the over-limit line when `--max` was exceeded.
+/// `worst` reads like the table (`100+`); `mean` is the real number.
 fn write_summary<W: Write>(w: &mut W, summary: &Summary) -> io::Result<()> {
     write!(
         w,
@@ -255,7 +256,11 @@ fn write_summary<W: Write>(w: &mut W, summary: &Summary) -> io::Result<()> {
         write!(
             w,
             " · mean {:.1} · worst {} ({} at {}:{})",
-            summary.mean, worst.func.complexity, worst.func.name, worst.file, worst.func.line
+            summary.mean,
+            shown_complexity(worst.func.complexity),
+            worst.func.name,
+            worst.file,
+            worst.func.line
         )?;
     }
     writeln!(w)?;
@@ -508,6 +513,21 @@ src/b.rs
             out.contains("1 function in 1 file · mean 2.0 · worst 2 (f at a.rs:1)"),
             "got:\n{out}"
         );
+    }
+
+    #[test]
+    fn the_summary_shows_a_worst_above_the_cap_as_100_plus_and_the_real_mean() {
+        let rows = vec![
+            row("a.rs", func("f", FN, 1, 101, 0)),
+            row("a.rs", func("g", FN, 2, 100, 0)),
+        ];
+        let out = render(&rows, true, false);
+        assert!(
+            out.contains("2 functions in 1 file · mean 100.5 · worst 100+ (f at a.rs:1)"),
+            "got:\n{out}"
+        );
+        let at_cap = render(&[row("a.rs", func("g", FN, 2, 100, 0))], true, false);
+        assert!(at_cap.contains("· worst 100 (g at a.rs:2)"), "got:\n{at_cap}");
     }
 
     #[test]

@@ -490,3 +490,36 @@ fn a_stack_overflow_on_stdin_is_reported_too() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("rustcx: <stdin>: {STACK_OVERFLOW}\n"));
 }
+
+/// One Rust function of complexity `1 + branches`.
+fn rust_branchy(branches: usize) -> String {
+    format!("fn big(a: bool) {{ {} }}\n", "if a {} ".repeat(branches))
+}
+
+#[test]
+fn a_score_above_100_shows_as_100_plus_in_the_table_and_summary() {
+    let dir = temp_dir("capped-table");
+    std::fs::write(dir.join("big.rs"), rust_branchy(100)).unwrap();
+    let (stdout, stderr, code) = cmplx_in(&dir, &["big.rs"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(row_for(&stdout, "big").starts_with("  100+"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("1 function in 1 file · mean 101.0 · worst 100+ (big at big.rs:1)"),
+        "the mean stays real:\n{stdout}"
+    );
+}
+
+#[test]
+fn json_keeps_the_real_score_and_flags_it_capped() {
+    let dir = temp_dir("capped-json");
+    std::fs::write(dir.join("big.rs"), rust_branchy(100)).unwrap();
+    std::fs::write(dir.join("ok.rs"), rust_branchy(99)).unwrap();
+    let (stdout, stderr, code) = cmplx_in(&dir, &["--json", "big.rs", "ok.rs"]);
+    assert_eq!(code, 0, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["functions"][0]["complexity"], 101);
+    assert_eq!(v["functions"][0]["capped"], true);
+    assert_eq!(v["functions"][1]["complexity"], 100);
+    assert!(v["functions"][1].get("capped").is_none(), "{}", v["functions"][1]);
+    assert_eq!(v["summary"]["worst"]["complexity"], 101);
+}
