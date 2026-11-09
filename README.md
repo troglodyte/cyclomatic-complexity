@@ -336,18 +336,14 @@ file, the rest of the run continues, and the run exits 2.
 | Cap | Value | At the cap |
 | --- | --- | --- |
 | Rust nesting depth | 64 levels of `(`, `[` or `{` | `path:line: not scored: too deeply nested to score (> 64 levels)`, at the line where the depth is first exceeded. In the language server, one warning on that line instead of scores. |
-| Rust chains `syn` recurses on | 100 prefix operators in a row (`&`, `*`, `!`, `-`, `box`); 70 levels of generics; 90 `->` in one type; 200 closures, ranges, assignments, returns or breaks in one expression; 6,000 operators in one expression; 6,000 branches in one `else if` chain; and a shared budget when several combine | The same `not scored` warning, naming what was too deep, e.g. `(> 70 levels of generics)` or `(several kinds of nesting together)`. |
 | JS/TS nesting depth | none needed | The lexer and analyzer keep explicit stacks; 100,000 levels are scored. |
 | Directory depth | 64 levels below each path given | `path: directory nesting deeper than 64; not scanned`. The directory is skipped and the rest of the tree is scanned. |
 | File size | 10 MB (10,485,760 bytes), files and stdin | `path: larger than 10 MB; not scored` (`<stdin>` for stdin). The language server publishes no diagnostics for a larger document and logs once. |
 
-The Rust caps exist because `syn` parses recursively, and a stack overflow
+The Rust cap exists because `syn` parses recursively, and a stack overflow
 aborts the process instead of failing one file. Rust files are parsed on their
-own 16 MB thread, and each cap is about a quarter of the depth at which that
-thread overflowed in a debug build. The counts come from a token scan, not a
-parse, and lean towards counting too much: an odd file may go unscored, but a
-scored file is never scored differently. None of the 32,343 Rust files in a
-local Cargo registry hit a cap.
+own 16 MB thread. The depth is counted on tokens, so brackets in strings,
+chars and comments do not count.
 
 ## Development
 
