@@ -16,6 +16,10 @@ use std::process::ExitCode;
 /// The file name rows read from stdin are reported under.
 const STDIN_NAME: &str = "<stdin>";
 
+/// Largest file, or stdin, that is read and scored. Anything larger is
+/// reported as a problem instead, so one huge input cannot exhaust memory.
+pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Run a binary whose languages are `reg`: read `std::env::args`, then either
 /// serve `--lsp` or score the given paths.
 pub fn run(program: &'static str, reg: Registry) -> ExitCode {
@@ -105,6 +109,19 @@ fn execute<R: Read, W: Write, E: Write>(
     out: &mut W,
     err: &mut E,
 ) -> u8 {
+    execute_with_cap(cli, reg, config, stdin, out, err, MAX_FILE_BYTES)
+}
+
+/// [`execute`] with sources capped at `max_bytes` rather than [`MAX_FILE_BYTES`].
+fn execute_with_cap<R: Read, W: Write, E: Write>(
+    cli: &Cli,
+    reg: &Registry,
+    config: &FileConfig,
+    stdin: &mut R,
+    out: &mut W,
+    err: &mut E,
+    max_bytes: u64,
+) -> u8 {
     let mut warn = |msg: String| {
         // Nowhere left to report a failure to write a warning.
         let _ = writeln!(err, "{}: {msg}", cli.program);
@@ -112,15 +129,22 @@ fn execute<R: Read, W: Write, E: Write>(
     let mut rows: Vec<Row> = Vec::new();
     let mut ok = true;
     if cli.stdin {
-        let mut bytes = Vec::new();
-        if let Err(e) = stdin.read_to_end(&mut bytes) {
-            warn(format!("{STDIN_NAME}: {e}"));
-            return 2;
+        match read_capped(stdin, None, max_bytes) {
+            Ok(bytes) => {
+                let src = String::from_utf8_lossy(&bytes);
+                ok &= score_stdin(&mut rows, cli, config, &src, &mut warn);
+            }
+            Err(ReadFailure::TooLarge) => {
+                warn(too_large(STDIN_NAME, max_bytes));
+                ok = false;
+            }
+            Err(ReadFailure::Io(e)) => {
+                warn(format!("{STDIN_NAME}: {e}"));
+                return 2;
+            }
         }
-        let src = String::from_utf8_lossy(&bytes);
-        ok &= score_stdin(&mut rows, cli, config, &src, &mut warn);
     }
-    ok &= score_files(&mut rows, cli, reg, config, &mut warn);
+    ok &= score_files(&mut rows, cli, reg, config, max_bytes, &mut warn);
 
     let filter = Filter {
         min: cli.min,
@@ -166,6 +190,7 @@ fn score_files(
     cli: &Cli,
     reg: &Registry,
     config: &FileConfig,
+    max_bytes: u64,
     warn: &mut impl FnMut(String),
 ) -> bool {
     let scope = Scope {
@@ -179,18 +204,73 @@ fn score_files(
     expanded.problems.into_iter().for_each(&mut *warn);
     for source in &expanded.sources {
         let name = source.path.display().to_string();
-        match fs::read(&source.path) {
+        match read_file_capped(&source.path, max_bytes) {
             Ok(bytes) => {
                 let src = String::from_utf8_lossy(&bytes);
                 ok &= score_into(rows, &name, &source.path, source.lang, &src, config, warn);
             }
-            Err(e) => {
+            Err(ReadFailure::TooLarge) => {
+                warn(too_large(&name, max_bytes));
+                ok = false;
+            }
+            Err(ReadFailure::Io(e)) => {
                 warn(format!("{name}: {e}"));
                 ok = false;
             }
         }
     }
     ok
+}
+
+/// Why a source was not read.
+enum ReadFailure {
+    /// It holds more than the cap.
+    TooLarge,
+    Io(io::Error),
+}
+
+/// Read a file of at most `max_bytes`, checking its size before reading.
+fn read_file_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ReadFailure> {
+    let file = fs::File::open(path).map_err(ReadFailure::Io)?;
+    let len = file.metadata().map_err(ReadFailure::Io)?.len();
+    read_capped(file, Some(len), max_bytes)
+}
+
+/// Read all of `reader` if it holds at most `max_bytes`. `known_len`, when
+/// given, refuses an oversized source without reading it; the read itself is
+/// bounded too, so a source that grows while being read cannot exceed the cap.
+fn read_capped(
+    reader: impl Read,
+    known_len: Option<u64>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ReadFailure> {
+    if known_len.is_some_and(|len| len > max_bytes) {
+        return Err(ReadFailure::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(known_len.unwrap_or(0) as usize);
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(ReadFailure::Io)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(ReadFailure::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// The warning for a source over the cap.
+fn too_large(name: &str, max_bytes: u64) -> String {
+    format!("{name}: larger than {}; not scored", size_label(max_bytes))
+}
+
+/// `10 MB` for a whole number of mebibytes, else the byte count.
+pub(crate) fn size_label(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes > 0 && bytes.is_multiple_of(MIB) {
+        format!("{} MB", bytes / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Analyze one source and append its rows. Returns false on a parse error,
@@ -373,18 +453,24 @@ mod tests {
         execute_bytes(reg, list, stdin.as_bytes())
     }
 
-    fn execute_bytes(reg: &Registry, list: &[&str], mut stdin: &[u8]) -> Outcome {
+    fn execute_bytes(reg: &Registry, list: &[&str], stdin: &[u8]) -> Outcome {
+        execute_capped(reg, list, stdin, MAX_FILE_BYTES)
+    }
+
+    /// `execute`, with files and stdin capped at `max_bytes`.
+    fn execute_capped(reg: &Registry, list: &[&str], mut stdin: &[u8], max_bytes: u64) -> Outcome {
         colored::control::set_override(false);
         let cli = parse(reg, list);
         let config = apply(&cli, FileConfig::default());
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = execute(
+        let code = execute_with_cap(
             &cli,
             reg,
             &config,
             &mut stdin,
             &mut out,
             &mut err,
+            max_bytes,
         );
         Outcome {
             code,
@@ -552,6 +638,56 @@ mod tests {
         );
         assert!(out.stdout.contains("shown"), "got:\n{}", out.stdout);
         assert!(!out.stdout.contains("hidden"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
+    fn the_file_size_cap_is_ten_mebibytes() {
+        assert_eq!(MAX_FILE_BYTES, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_file_at_the_size_cap_is_scored() {
+        let dir = temp_dir("at-cap");
+        let text = "f 1\n";
+        let path = file(&dir, "a.rs", text);
+        let out = execute_capped(&both(), &[&path], b"", text.len() as u64);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert!(out.stdout.contains("1 function"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_a_problem_and_the_rest_is_still_scored() {
+        let dir = temp_dir("over-cap");
+        let big = file(&dir, "big.rs", "big 1\n");
+        let small = file(&dir, "small.rs", "f 1\n");
+        let out = execute_capped(&both(), &[&big, &small], b"", 5);
+        assert_eq!(out.code, 2);
+        assert_eq!(out.stderr, format!("cmplx: {big}: larger than 5 bytes; not scored\n"));
+        assert!(out.stdout.contains("1 function"), "got:\n{}", out.stdout);
+        assert!(!out.stdout.contains("big"), "got:\n{}", out.stdout);
+    }
+
+    #[test]
+    fn stdin_at_the_size_cap_is_scored_and_over_it_is_a_problem() {
+        let at = execute_capped(&both(), &["--js", "-"], b"f 1\n", 4);
+        assert_eq!(at.code, 0, "{}", at.stderr);
+
+        let over = execute_capped(&both(), &["--js", "-"], b"f 1\n", 3);
+        assert_eq!(over.code, 2);
+        assert_eq!(over.stderr, "cmplx: <stdin>: larger than 3 bytes; not scored\n");
+    }
+
+    #[test]
+    fn a_source_that_outgrows_its_reported_size_is_still_capped() {
+        let read = read_capped(&b"0123456789"[..], Some(2), 5);
+        assert!(matches!(read, Err(ReadFailure::TooLarge)));
+        assert_eq!(read_capped(&b"01234"[..], Some(2), 5).ok(), Some(b"01234".to_vec()));
+    }
+
+    #[test]
+    fn a_size_reads_as_whole_megabytes_when_it_is_one() {
+        assert_eq!(size_label(MAX_FILE_BYTES), "10 MB");
+        assert_eq!(size_label(5), "5 bytes");
     }
 
     #[test]

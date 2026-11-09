@@ -17,6 +17,7 @@
 use crate::config::{FileConfig, Watched};
 use crate::language::{Lang, LangOptions, Registry};
 use crate::model::Func;
+use crate::run::{size_label, MAX_FILE_BYTES};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -61,6 +62,8 @@ struct Server<W: Write> {
     /// The watched `cmplx.toml` (or `rustcx.toml`), re-read on mtime change.
     /// `None` until `initialize` says where to look.
     config: Option<Watched>,
+    /// Largest document scored; [`MAX_FILE_BYTES`] outside tests.
+    max_bytes: u64,
     out: W,
 }
 
@@ -72,6 +75,7 @@ impl<W: Write> Server<W> {
             docs: HashMap::new(),
             init: FileConfig::default(),
             config: None,
+            max_bytes: MAX_FILE_BYTES,
             out,
         }
     }
@@ -190,6 +194,9 @@ impl<W: Write> Server<W> {
             self.docs.remove(uri);
             return self.publish(uri, Vec::new());
         };
+        if text.len() as u64 > self.max_bytes {
+            return self.too_large(uri);
+        }
         let funcs = match lang.analyze(text, &path, &opts) {
             Ok(funcs) => funcs,
             Err(e) => return self.parse_failed(uri, &format!("{uri}: {}: {}", e.line, e.message)),
@@ -215,6 +222,20 @@ impl<W: Write> Server<W> {
         }
         doc.last_error = Some(message.to_string());
         self.log(message)
+    }
+
+    /// Publish no diagnostics for a document over the size cap, as the CLI
+    /// scores no file over it, and forget its scores so hover does not answer
+    /// from a stale version. Logged once until the message changes.
+    fn too_large(&mut self, uri: &str) -> io::Result<()> {
+        let message = format!("{uri}: larger than {}; not scored", size_label(self.max_bytes));
+        let doc = self.docs.entry(uri.to_string()).or_default();
+        doc.funcs.clear();
+        if doc.last_error.as_deref() != Some(message.as_str()) {
+            doc.last_error = Some(message.clone());
+            self.log(&message)?;
+        }
+        self.publish(uri, Vec::new())
     }
 
     /// Handle a request — a message with an id, which a client is waiting on.
@@ -879,6 +900,49 @@ mod tests {
             logs, 2,
             "a file that breaks, is fixed, then breaks the same way logs twice"
         );
+    }
+
+    #[test]
+    fn a_document_over_the_size_cap_has_no_diagnostics_and_is_logged_once() {
+        let mut s = server();
+        initialize(&mut s, Value::Null);
+        s.max_bytes = 8;
+        open(&mut s, "file:///x/a.fk", "f 20");
+        sent(&mut s);
+
+        open(&mut s, "file:///x/a.fk", "big 20\nf 1\n");
+        let first = sent(&mut s);
+        let logs: Vec<&Value> = first.iter().filter(|m| m["method"] == "window/logMessage").collect();
+        assert_eq!(logs.len(), 1, "{first:?}");
+        assert_eq!(
+            logs[0]["params"]["message"],
+            "cmplx: file:///x/a.fk: larger than 8 bytes; not scored"
+        );
+        let lists: Vec<&Value> = first
+            .iter()
+            .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+            .collect();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0]["params"]["diagnostics"], json!([]));
+        assert_eq!(hover_line(&s, 0), Value::Null, "no stale scores either");
+
+        open(&mut s, "file:///x/a.fk", "big 20\nf 2\n");
+        assert_eq!(logs_only(&mut s), 0, "logged once");
+
+        open(&mut s, "file:///x/a.fk", "f 20");
+        assert_eq!(published(&mut s)[0].as_array().unwrap().len(), 1, "scored again");
+    }
+
+    #[test]
+    fn the_server_caps_documents_at_the_cli_file_cap() {
+        assert_eq!(server().max_bytes, crate::run::MAX_FILE_BYTES);
+    }
+
+    fn logs_only(server: &mut Server<Vec<u8>>) -> usize {
+        sent(server)
+            .iter()
+            .filter(|m| m["method"] == "window/logMessage")
+            .count()
     }
 
     #[test]
