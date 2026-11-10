@@ -208,99 +208,153 @@ impl<'a> Lexer<'a> {
     // ------------------------------------------------------------ normal mode
 
     fn lex_normal(&mut self) {
-        let src = self.src;
-        let b = self.b;
-        let n = b.len();
-        let c = b[self.i];
+        let c = self.b[self.i];
+        if self.skip_whitespace(c) || self.skip_comment(c) || self.lex_token(c) {
+            return;
+        }
+        if self.close_expr_brace(c) {
+            return;
+        }
+        self.lex_punct();
+    }
 
+    /// Whitespace and line terminators produce no token; newlines bump the line.
+    fn skip_whitespace(&mut self, c: u8) -> bool {
         if c == b' ' || c == b'\t' || c == b'\r' || c == 0x0b || c == 0x0c {
             self.i += 1;
-            return;
+            return true;
         }
         if c == b'\n' {
             self.line += 1;
             self.i += 1;
-            return;
+            return true;
         }
         if c >= 0x80 {
-            if let Some(w) = unicode_space_len(b, self.i) {
+            if let Some(w) = unicode_space_len(self.b, self.i) {
                 self.i += w;
-                return;
+                return true;
             }
         }
+        false
+    }
 
-        // comments
-        if c == b'/' && self.i + 1 < n {
-            let d = b[self.i + 1];
-            if d == b'/' {
-                let mut j = self.i;
-                while j < n && b[j] != b'\n' {
-                    j += 1;
-                }
-                self.i = j;
-                return;
-            }
-            if d == b'*' {
-                let mut j = self.i + 2;
-                while j + 1 < n && !(b[j] == b'*' && b[j + 1] == b'/') {
-                    j += 1;
-                }
-                let end = if j + 1 < n { j + 2 } else { n };
-                self.count_lines(self.i, end);
-                self.i = end;
-                return;
-            }
+    fn skip_comment(&mut self, c: u8) -> bool {
+        if c != b'/' || self.i + 1 >= self.b.len() {
+            return false;
         }
-
-        if c == b'/' && self.regex_allowed() && self.lex_regex() {
-            return;
+        match self.b[self.i + 1] {
+            b'/' => self.skip_line_comment(),
+            b'*' => self.skip_block_comment(),
+            _ => return false,
         }
+        true
+    }
 
-        if c == b'`' {
+    fn skip_line_comment(&mut self) {
+        let b = self.b;
+        let mut j = self.i;
+        while j < b.len() && b[j] != b'\n' {
+            j += 1;
+        }
+        self.i = j;
+    }
+
+    /// An unterminated block comment runs to the end of the input.
+    fn skip_block_comment(&mut self) {
+        let b = self.b;
+        let n = b.len();
+        let mut j = self.i + 2;
+        while j + 1 < n && !(b[j] == b'*' && b[j + 1] == b'/') {
+            j += 1;
+        }
+        let end = if j + 1 < n { j + 2 } else { n };
+        self.count_lines(self.i, end);
+        self.i = end;
+    }
+
+    /// Regexes, JSX openers, quoted literals, numbers and identifiers. The arms
+    /// are disjoint on `c`, so their order does not matter; comments are tried
+    /// before this, which is what keeps `//` and `/*` out of the regex arm.
+    fn lex_token(&mut self, c: u8) -> bool {
+        match c {
+            b'/' => self.regex_allowed() && self.lex_regex(),
+            b'<' => self.jsx && self.jsx_allowed() && self.try_jsx_open(),
+            b'`' | b'\'' | b'"' => {
+                self.lex_quoted(c);
+                true
+            }
+            _ => self.lex_word(c),
+        }
+    }
+
+    /// A template opens a frame and is lexed span by span; a string is one token.
+    fn lex_quoted(&mut self, quote: u8) {
+        if quote == b'`' {
             self.i += 1;
             self.frames.push(Frame::new(FrameKind::Template));
-            return;
+        } else {
+            self.lex_string(quote);
         }
-        if c == b'\'' || c == b'"' {
-            self.lex_string(c);
-            return;
-        }
-        if c.is_ascii_digit() || (c == b'.' && self.i + 1 < n && b[self.i + 1].is_ascii_digit()) {
+    }
+
+    fn lex_word(&mut self, c: u8) -> bool {
+        if self.starts_number(c) {
             self.lex_number();
-            return;
+        } else if is_id_start(c) {
+            self.lex_ident();
+        } else {
+            return false;
         }
-        if is_id_start(c) {
-            let st = self.i;
+        true
+    }
+
+    fn starts_number(&self, c: u8) -> bool {
+        c.is_ascii_digit()
+            || (c == b'.' && self.i + 1 < self.b.len() && self.b[self.i + 1].is_ascii_digit())
+    }
+
+    fn lex_ident(&mut self) {
+        let n = self.b.len();
+        let st = self.i;
+        self.i += 1;
+        while self.i < n && is_id_part(self.b[self.i]) {
             self.i += 1;
-            while self.i < n && is_id_part(b[self.i]) {
+        }
+        self.push(Kind::Ident, &self.src[st..self.i], None);
+    }
+
+    /// Brace bookkeeping for `${ }` and JSX `{ }` containers. Returns true when
+    /// `c` closed the container, which consumes it; otherwise the brace (if any)
+    /// is counted and still lexed as punctuation.
+    fn close_expr_brace(&mut self, c: u8) -> bool {
+        let Some(frame) = self.frames.last_mut().filter(|f| f.kind == FrameKind::Expr) else {
+            return false;
+        };
+        match c {
+            b'}' if frame.depth == 0 => {
+                let emit = frame.emit_close;
+                self.frames.pop();
                 self.i += 1;
-            }
-            self.push(Kind::Ident, &src[st..self.i], None);
-            return;
-        }
-        if c == b'<' && self.jsx && self.jsx_allowed() && self.try_jsx_open() {
-            return;
-        }
-
-        // Brace bookkeeping for `${ }` and JSX `{ }` containers.
-        if self.frames.last().map(|f| f.kind) == Some(FrameKind::Expr) {
-            if c == b'}' {
-                let f = self.frames.last().unwrap();
-                if f.depth == 0 {
-                    let emit = f.emit_close;
-                    self.frames.pop();
-                    self.i += 1;
-                    if emit {
-                        self.push(Kind::Punct, "}", None);
-                    }
-                    return;
+                if emit {
+                    self.push(Kind::Punct, "}", None);
                 }
-                self.frames.last_mut().unwrap().depth -= 1;
-            } else if c == b'{' {
-                self.frames.last_mut().unwrap().depth += 1;
+                true
             }
+            b'}' => {
+                frame.depth -= 1;
+                false
+            }
+            b'{' => {
+                frame.depth += 1;
+                false
+            }
+            _ => false,
         }
+    }
 
+    /// Longest-match punctuation from `PUNCTS`, else a single byte.
+    fn lex_punct(&mut self) {
+        let src = self.src;
         for &p in PUNCTS {
             if src[self.i..].starts_with(p) {
                 self.i += p.len();
