@@ -145,6 +145,14 @@ pub fn analyze(src: &str, jsx: bool, opts: Options) -> Vec<Func> {
     Analyzer::new(lex(src, jsx), opts).run()
 }
 
+/// A method's body span and the type-annotation ranges to mask once it is
+/// confirmed to be a method.
+struct MethodSig {
+    body_open: usize,
+    body_close: usize,
+    type_ranges: Vec<(usize, usize)>,
+}
+
 struct Analyzer<'a> {
     t: Vec<Token<'a>>,
     mask: Vec<bool>,
@@ -917,108 +925,112 @@ impl<'a> Analyzer<'a> {
     }
 
     fn try_method(&mut self, i: usize) -> bool {
-        let tk = self.t[i];
-        let ii = i as isize;
-
-        if tk.kind == Kind::Ident && CONTROL.contains(&tk.text) {
+        if !self.method_prefix_ok(i) {
             return false;
         }
-        if self.p(ii - 1, ".") || self.p(ii - 1, "?.") {
+        let Some(sig) = self.method_signature(i) else {
             return false;
-        }
-        // `function *name(` is handled by try_function, not here.
-        let mut k = ii - 1;
-        while self.p(k, "*")
-            || matches!(self.at(k), Some(t) if t.kind == Kind::Ident && MODIFIERS.contains(&t.text))
-        {
-            k -= 1;
-        }
-        if self.w(k, "function") {
-            return false;
-        }
-        let prev_ok = i == 0
-            || match self.at(ii - 1) {
-                Some(t) => match t.kind {
-                    Kind::Punct => matches!(t.text, "{" | "}" | ";" | "," | "*" | ")" | "]"),
-                    Kind::Ident => MODIFIERS.contains(&t.text),
-                    _ => false,
-                },
-                None => false,
-            };
-        if !prev_ok {
-            return false;
-        }
-
-        let mut j = i + 1;
-        let mut generics: Option<(usize, usize)> = None;
-        if tk.kind == Kind::Punct && tk.text == "[" {
-            match self.pair(ii) {
-                Some(e) => j = e as usize + 1,
-                None => return false,
-            }
-        }
-        if self.p(j as isize, "?") {
-            j += 1;
-        }
-        if self.p(j as isize, "<") {
-            match self.skip_generics(j) {
-                Some(k2) => {
-                    generics = Some((j, k2 - 1));
-                    j = k2;
-                }
-                None => return false,
-            }
-        }
-        if !self.p(j as isize, "(") {
-            return false;
-        }
-        let close = match self.pair(j as isize) {
-            Some(c) => c as usize,
-            None => return false,
         };
-        // Compute marks but only commit them if this really is a method: a call
-        // like `f(a ? b : c)` must not have its `: c` masked.
-        let ptypes = self.param_type_ranges(j, close);
-        let (after, rt) = self.return_type_end(close);
-        if !self.p(after as isize, "{") {
-            return false;
-        }
-        let end = match self.pair(after as isize) {
-            Some(e) => e as usize,
-            None => return false,
-        };
-
-        if let Some((a, b)) = generics {
+        for (a, b) in sig.type_ranges {
             self.mark(a as isize, b as isize);
         }
-        for (a, b) in ptypes {
-            self.mark(a as isize, b as isize);
-        }
-        if let Some((a, b)) = rt {
-            self.mark(a as isize, b as isize);
-        }
-
-        let name = match tk.kind {
-            Kind::Ident | Kind::Str => strip_quotes(tk.text).to_string(),
-            _ => {
-                // `["name"]() {}` -- use the literal when it is a single token.
-                if self.pair(ii) == Some(ii + 2)
-                    && matches!(self.at(ii + 1), Some(t) if matches!(t.kind, Kind::Ident | Kind::Str))
-                {
-                    strip_quotes(self.t[i + 1].text).to_string()
-                } else {
-                    "[computed]".to_string()
-                }
-            }
-        };
+        let name = self.method_name(i);
         let base = if name == "constructor" {
             FnKind::Constructor
         } else {
             FnKind::Method
         };
         let kind = self.kind_before(i, base);
-        self.add(name, kind, i, after, end);
+        self.add(name, kind, i, sig.body_open, sig.body_close);
         true
+    }
+
+    /// Whether token `i` sits where a method name can: not a control keyword,
+    /// not a member access, not `function name(` (try_function owns that), and
+    /// after a token that can end a previous class or object member.
+    fn method_prefix_ok(&self, i: usize) -> bool {
+        let tk = self.t[i];
+        let ii = i as isize;
+        if tk.kind == Kind::Ident && CONTROL.contains(&tk.text) {
+            return false;
+        }
+        if self.p(ii - 1, ".") || self.p(ii - 1, "?.") {
+            return false;
+        }
+        let mut k = ii - 1;
+        while self.p(k, "*")
+            || matches!(self.at(k), Some(t) if t.kind == Kind::Ident && MODIFIERS.contains(&t.text))
+        {
+            k -= 1;
+        }
+        !self.w(k, "function") && (i == 0 || self.member_boundary(ii - 1))
+    }
+
+    /// A token that can directly precede a member name.
+    fn member_boundary(&self, k: isize) -> bool {
+        match self.at(k) {
+            Some(t) => match t.kind {
+                Kind::Punct => matches!(t.text, "{" | "}" | ";" | "," | "*" | ")" | "]"),
+                Kind::Ident => MODIFIERS.contains(&t.text),
+                _ => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Parse `name?<T>(params): R {` from token `i`. Nothing is marked here: a
+    /// call like `f(a ? b : c)` must not have its `: c` masked, so the type
+    /// ranges are returned and only committed once this is known to be a method.
+    fn method_signature(&self, i: usize) -> Option<MethodSig> {
+        let (open, generics) = self.method_params_open(i)?;
+        let close = self.pair(open as isize)? as usize;
+        let params = self.param_type_ranges(open, close);
+        let (body_open, ret) = self.return_type_end(close);
+        if !self.p(body_open as isize, "{") {
+            return None;
+        }
+        let body_close = self.pair(body_open as isize)? as usize;
+        let type_ranges = generics.into_iter().chain(params).chain(ret).collect();
+        Some(MethodSig {
+            body_open,
+            body_close,
+            type_ranges,
+        })
+    }
+
+    /// Index of the `(` opening the parameters, past a computed name, an
+    /// optional `?` and type parameters, with the type-parameter range if any.
+    fn method_params_open(&self, i: usize) -> Option<(usize, Option<(usize, usize)>)> {
+        let mut j = i + 1;
+        if self.p(i as isize, "[") {
+            j = self.pair(i as isize)? as usize + 1;
+        }
+        if self.p(j as isize, "?") {
+            j += 1;
+        }
+        let mut generics = None;
+        if self.p(j as isize, "<") {
+            let after = self.skip_generics(j)?;
+            generics = Some((j, after - 1));
+            j = after;
+        }
+        self.p(j as isize, "(").then_some((j, generics))
+    }
+
+    fn method_name(&self, i: usize) -> String {
+        let tk = self.t[i];
+        let ii = i as isize;
+        if matches!(tk.kind, Kind::Ident | Kind::Str) {
+            return strip_quotes(tk.text).to_string();
+        }
+        // `["name"]() {}` -- use the literal when it is a single token.
+        if self.pair(ii) == Some(ii + 2)
+            && matches!(self.at(ii + 1), Some(t) if matches!(t.kind, Kind::Ident | Kind::Str))
+        {
+            strip_quotes(self.t[i + 1].text).to_string()
+        } else {
+            "[computed]".to_string()
+        }
     }
 
     // ------------------------------------------------------ nesting + scoring
