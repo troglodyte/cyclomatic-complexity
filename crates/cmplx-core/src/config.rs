@@ -243,57 +243,96 @@ impl FileConfig {
             }
             return (cfg, warnings);
         };
-        let number = |value: &serde_json::Value| value.as_u64().and_then(|n| u32::try_from(n).ok());
         // Flat keys first so nested tables win, as in `cmplx.toml`.
         for (key, value) in map {
-            match key.as_str() {
-                "max" | "threshold" => match number(value) {
-                    Some(n) if key == "max" => cfg.max = Some(n),
-                    Some(n) if n < MIN_THRESHOLD => warnings.push(format!(
-                        "initializationOptions `threshold` must be at least {MIN_THRESHOLD}; ignored"
-                    )),
-                    Some(n) => cfg.threshold = Some(n),
-                    None => warnings.push(format!(
-                        "initializationOptions `{key}` must be a non-negative integer; ignored"
-                    )),
-                },
-                _ if reg.by_id(key).is_some() && value.is_object() => {}
-                _ => {
-                    let owners: Vec<_> = declaring_langs(active, key).collect();
-                    match (owners.is_empty(), value.as_bool()) {
-                        (true, _) => warnings.push(format!(
-                            "unknown initializationOptions key `{key}`; ignored"
-                        )),
-                        (false, None) => warnings.push(format!(
-                            "initializationOptions `{key}` must be a boolean; ignored"
-                        )),
-                        (false, Some(flag)) => owners
-                            .into_iter()
-                            .for_each(|(lang, k)| cfg.set(lang, k, flag)),
-                    }
-                }
-            }
+            cfg.apply_flat_init_option(key, value, reg, active, &mut warnings);
         }
         for (id, value) in map {
-            let Some(options) = value.as_object().filter(|_| reg.by_id(id).is_some()) else {
-                continue;
-            };
-            let Some(lang) = active.iter().copied().find(|lang| lang.id() == id) else {
-                continue;
-            };
-            for (key, value) in options {
-                match (declared_key(lang, key), value.as_bool()) {
-                    (None, _) => warnings.push(format!(
-                        "unknown initializationOptions key `{key}` in `{id}`; ignored"
+            cfg.apply_init_table(id, value, reg, active, &mut warnings);
+        }
+        (cfg, warnings)
+    }
+
+    /// A top-level key: `max`, `threshold`, a language table (left for
+    /// `apply_init_table`), or a flag for every active language declaring it.
+    fn apply_flat_init_option(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        reg: &Registry,
+        active: &[Lang],
+        warnings: &mut Vec<String>,
+    ) {
+        match key {
+            "max" | "threshold" => self.apply_init_number(key, value, warnings),
+            _ if reg.by_id(key).is_some() && value.is_object() => {}
+            _ => {
+                let owners: Vec<_> = declaring_langs(active, key).collect();
+                match (owners.is_empty(), value.as_bool()) {
+                    (true, _) => warnings.push(format!(
+                        "unknown initializationOptions key `{key}`; ignored"
                     )),
-                    (Some(_), None) => warnings.push(format!(
-                        "initializationOptions `{id}.{key}` must be a boolean; ignored"
+                    (false, None) => warnings.push(format!(
+                        "initializationOptions `{key}` must be a boolean; ignored"
                     )),
-                    (Some(k), Some(flag)) => cfg.set(lang, k, flag),
+                    (false, Some(flag)) => owners
+                        .into_iter()
+                        .for_each(|(lang, k)| self.set(lang, k, flag)),
                 }
             }
         }
-        (cfg, warnings)
+    }
+
+    fn apply_init_number(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(n) = value.as_u64().and_then(|n| u32::try_from(n).ok()) else {
+            warnings.push(format!(
+                "initializationOptions `{key}` must be a non-negative integer; ignored"
+            ));
+            return;
+        };
+        if key == "max" {
+            self.max = Some(n);
+        } else if n < MIN_THRESHOLD {
+            warnings.push(format!(
+                "initializationOptions `threshold` must be at least {MIN_THRESHOLD}; ignored"
+            ));
+        } else {
+            self.threshold = Some(n);
+        }
+    }
+
+    /// A `{ "<language id>": { key: bool, … } }` table, applied only when that
+    /// language is active. Anything else at the top level was handled as flat.
+    fn apply_init_table(
+        &mut self,
+        id: &str,
+        value: &serde_json::Value,
+        reg: &Registry,
+        active: &[Lang],
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(options) = value.as_object().filter(|_| reg.by_id(id).is_some()) else {
+            return;
+        };
+        let Some(lang) = active.iter().copied().find(|lang| lang.id() == id) else {
+            return;
+        };
+        for (key, value) in options {
+            match (declared_key(lang, key), value.as_bool()) {
+                (None, _) => warnings.push(format!(
+                    "unknown initializationOptions key `{key}` in `{id}`; ignored"
+                )),
+                (Some(_), None) => warnings.push(format!(
+                    "initializationOptions `{id}.{key}` must be a boolean; ignored"
+                )),
+                (Some(k), Some(flag)) => self.set(lang, k, flag),
+            }
+        }
     }
 
     /// Layer `self` over `lower`: a field set here wins, an unset one falls through.
@@ -787,6 +826,47 @@ mod tests {
             "inactive language ignored"
         );
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn init_options_that_are_not_an_object_are_warned_about_and_ignored() {
+        let v = serde_json::json!([1]);
+        let (cfg, warnings) = FileConfig::from_init_options(&v, &both(), &[rust()]);
+        assert_eq!(cfg, FileConfig::default());
+        assert_eq!(
+            warnings,
+            ["initializationOptions must be an object; ignored"]
+        );
+        let (_, warnings) =
+            FileConfig::from_init_options(&serde_json::Value::Null, &both(), &[rust()]);
+        assert!(warnings.is_empty(), "null means no options: {warnings:?}");
+    }
+
+    #[test]
+    fn a_non_boolean_flat_language_option_is_dropped_alone() {
+        let v = serde_json::json!({"tests": "no", "threshold": 6});
+        let (cfg, warnings) = FileConfig::from_init_options(&v, &both(), &[rust()]);
+        assert_eq!(cfg.options_for(rust()).get("tests"), None);
+        assert_eq!(cfg.threshold, Some(6));
+        assert_eq!(
+            warnings,
+            ["initializationOptions `tests` must be a boolean; ignored"]
+        );
+    }
+
+    #[test]
+    fn bad_keys_inside_a_language_table_are_dropped_alone() {
+        let v = serde_json::json!({"rust": {"bogus": true, "logical": 1, "tests": false}});
+        let (cfg, warnings) = FileConfig::from_init_options(&v, &both(), &[rust()]);
+        assert_eq!(cfg.options_for(rust()).get("tests"), Some(false));
+        assert_eq!(cfg.options_for(rust()).get("logical"), None);
+        assert_eq!(
+            warnings,
+            [
+                "unknown initializationOptions key `bogus` in `rust`; ignored",
+                "initializationOptions `rust.logical` must be a boolean; ignored",
+            ]
+        );
     }
 
     #[test]
